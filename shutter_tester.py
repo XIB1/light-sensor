@@ -10,9 +10,9 @@ Input sources
 Live input
 ----------
 A selected audio device is opened as a CONTINUOUS stereo stream. Audio is
-always written into a rolling ring buffer. Pressing "ARM LIVE INPUT" tells the
-program to detect the next shutter event in that already-running stream, so the
-first-curtain transient is not lost while the sound device is being opened.
+always written into a rolling ring buffer. Selecting a live input starts
+automatic shutter detection. After each event, a fresh baseline is collected
+and the tester listens for the next event without manual rearming.
 
 For shutter speeds where opening/closing transients should be separable, live
 capture uses a small state machine:
@@ -50,6 +50,7 @@ import math
 import sys
 import threading
 import tkinter as tk
+from collections import deque
 from dataclasses import dataclass
 from tkinter import messagebox, ttk
 
@@ -305,6 +306,7 @@ def simulate_shutter(
     sensor_tau_us: float = SENSOR_TAU_US,
     noise_rms: float = NOISE_RMS,
     rng: np.random.Generator | None = None,
+    sensor_spacing_mm: float = GATE_MM - SENSOR_WIDTH_MM,
 ) -> tuple[np.ndarray, dict]:
     if rng is None:
         rng = np.random.default_rng()
@@ -320,9 +322,9 @@ def simulate_shutter(
     first_velocity = gate_mm / first_travel_s
     second_velocity = gate_mm / second_travel_s
 
-    # Footprints just inside the two opposite edges.
+    # Sensor footprints separated by the configured center-to-center distance.
     s1 = (0.0, sensor_width_mm)
-    s2 = (gate_mm - sensor_width_mm, gate_mm)
+    s2 = (sensor_spacing_mm, sensor_spacing_mm + sensor_width_mm)
 
     pre_s = 0.012
     post_s = max(0.030, 5.0 / (2.0 * math.pi * ac_hz)) if ac_hz > 0 else 0.030
@@ -356,7 +358,7 @@ def simulate_shutter(
     if peak > 0.98:
         stereo *= 0.98 / peak
 
-    center_spacing_mm = gate_mm - sensor_width_mm
+    center_spacing_mm = sensor_spacing_mm
     meta = {
         "exposure_s": exposure_s,
         "first_velocity_mm_s": first_velocity,
@@ -546,11 +548,18 @@ def analyze_signal(
     nominal_s: float,
     fs: int = PREFERRED_FS,
     expected_travel_ms: float = CURTAIN_TRAVEL_MS,
+    sensor_spacing_mm: float = GATE_MM - SENSOR_WIDTH_MM,
+    opening_polarities: tuple[float, float] = (1.0, 1.0),
 ) -> AnalysisResult:
     if stereo.ndim != 2 or stereo.shape[1] != 2:
         raise ValueError("Expected stereo samples with shape (N, 2).")
     if expected_travel_ms <= 0:
         raise ValueError("Expected curtain travel time must be positive.")
+    if not np.isfinite(sensor_spacing_mm) or not 0 < sensor_spacing_mm <= GATE_MM:
+        raise ValueError(f"Sensor spacing must be greater than 0 and at most {GATE_MM:g} mm.")
+
+    # Normalize for analysis only; plots retain the original recorded polarity.
+    stereo = stereo * np.asarray(opening_polarities)[None, :]
 
     use_transients = uses_transient_method(nominal_s, expected_travel_ms)
 
@@ -602,7 +611,7 @@ def analyze_signal(
     first_delay = (o2 - o1) / fs
     second_delay = (c2 - c1) / fs
 
-    center_spacing_mm = GATE_MM - SENSOR_WIDTH_MM
+    center_spacing_mm = sensor_spacing_mm
 
     def delay_to_full_travel(delay_s: float) -> float:
         if abs(delay_s) < 1.0 / fs:
@@ -738,6 +747,7 @@ class ShutterTesterApp:
         self.follow_nominal_var = tk.BooleanVar(value=True)
         self.tolerance_var = tk.StringVar(value="±1/3 stop")
         self.expected_travel_var = tk.StringVar(value=f"{CURTAIN_TRAVEL_MS:g}")
+        self.sensor_spacing_var = tk.StringVar(value=f"{GATE_MM - SENSOR_WIDTH_MM:g}")
         self.travel_tolerance_var = tk.StringVar(value="±10%")
         self.sim_first_travel_var = tk.StringVar(value=f"{CURTAIN_TRAVEL_MS:g}")
         self.sim_second_travel_var = tk.StringVar(value=f"{CURTAIN_TRAVEL_MS:g}")
@@ -756,6 +766,8 @@ class ShutterTesterApp:
 
         # Live measurement state.
         self.live_state = "idle"
+        self.live_listening = False
+        self.live_ready_index = 0
         self.live_scan_index = 0
         self.live_first_open_index: int | None = None
         self.live_deadline_index: int | None = None
@@ -768,6 +780,8 @@ class ShutterTesterApp:
         self.live_threshold = np.full(2, LIVE_MIN_TRIGGER, dtype=np.float64)
         self.live_nominal_s = 0.001
         self.live_expected_travel_ms = CURTAIN_TRAVEL_MS
+        self.live_sensor_spacing_mm = GATE_MM - SENSOR_WIDTH_MM
+        self.live_opening_polarities = np.ones(2)
         self.live_transient_mode = True
 
         # Output vars.
@@ -794,6 +808,8 @@ class ShutterTesterApp:
             value="Set the expected full-gate travel time."
         )
 
+        # Session-only history, kept separately for each input source and speed.
+        self.test_history: dict[str, dict[float, deque]] = {}
         self._build_ui()
         self.refresh_input_devices()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -820,8 +836,13 @@ class ShutterTesterApp:
         sidebar_shell.rowconfigure(0, weight=1)
         sidebar_shell.columnconfigure(0, weight=1)
 
-        main = ttk.Frame(outer, padding=(10, 0, 0, 0))
-        main.grid(row=0, column=1, sticky="nsew")
+        notebook = ttk.Notebook(outer)
+        notebook.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        main = ttk.Frame(notebook, padding=6)
+        notebook.add(main, text="Current test")
+        summary = ttk.Frame(notebook, padding=18)
+        notebook.add(summary, text="Shutter speed summary")
+        self._build_summary_panel(summary)
 
         ttk.Separator(outer, orient="vertical").grid(
             row=0, column=0, sticky="nse"
@@ -1092,6 +1113,16 @@ class ShutterTesterApp:
             wraplength=355,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
         travel_settings.columnconfigure(1, weight=1)
+        ttk.Label(travel_settings, text="Sensor spacing:").grid(
+            row=4, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(travel_settings, textvariable=self.sensor_spacing_var, width=8).grid(
+            row=4, column=1, sticky="ew", pady=3
+        )
+        ttk.Label(travel_settings, text="mm").grid(row=4, column=2, sticky="w", padx=(4, 0))
+        ttk.Label(travel_settings, text="Measure between sensor centers.").grid(
+            row=5, column=0, columnspan=3, sticky="w"
+        )
         self._expected_travel_changed()
 
         # Simulator controls -------------------------------------------
@@ -1341,6 +1372,86 @@ class ShutterTesterApp:
     # Device enumeration / continuous audio
     # ------------------------------------------------------------------
 
+    def _build_summary_panel(self, panel):
+        ttk.Label(
+            panel, text="Shutter speed test summary",
+            font=("TkDefaultFont", 20, "bold"),
+        ).pack(anchor="w")
+        self.summary_source_var = tk.StringVar()
+        ttk.Label(panel, textvariable=self.summary_source_var).pack(
+            anchor="w", pady=(6, 4)
+        )
+        options = ttk.Frame(panel)
+        options.pack(fill="x", pady=(0, 6))
+        ttk.Label(options, text="Latest tests per speed:").pack(side="left")
+        self.summary_count_var = tk.StringVar(value="5")
+        count_selector = ttk.Combobox(
+            options, textvariable=self.summary_count_var,
+            values=[str(count) for count in range(1, 21)],
+            state="readonly", width=4,
+        )
+        count_selector.pack(side="left", padx=(8, 0))
+        count_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_summary())
+        ttk.Label(
+            panel,
+            text="Last 20 completed tests retained per speed; exposure averaged across both sensors.",
+        ).pack(anchor="w", pady=(0, 16))
+
+        style = ttk.Style(self.root)
+        style.configure("Summary.Treeview", rowheight=30, font=("TkDefaultFont", 11))
+        style.configure("Summary.Treeview.Heading", font=("TkDefaultFont", 10, "bold"))
+        self.summary_table = ttk.Treeview(
+            panel, columns=("speed", "count", "average", "min", "max"),
+            show="headings", height=len(COMMON_SPEEDS), style="Summary.Treeview",
+            selectmode="none",
+        )
+        for column, title, width in (
+            ("speed", "Marked speed", 110), ("count", "Tests", 65),
+            ("average", "Average (ms)", 145), ("min", "Min (ms)", 145),
+            ("max", "Max (ms)", 145),
+        ):
+            self.summary_table.heading(column, text=title)
+            self.summary_table.column(column, width=width, minwidth=60, anchor="center")
+        self.summary_table.tag_configure("alternate", background="#eef3f8")
+        self.summary_table.pack(fill="both", expand=True)
+        footer = ttk.Frame(panel)
+        footer.pack(fill="x", pady=(12, 0))
+        ttk.Label(
+            footer, text="Current session only. Min / max refer to exposure duration."
+        ).pack(side="left")
+        ttk.Button(footer, text="Clear summary", command=self._clear_summary).pack(side="right")
+        self._refresh_summary()
+
+    def _refresh_summary(self):
+        count = int(self.summary_count_var.get())
+        source = self.input_var.get()
+        self.summary_source_var.set(f"Input: {source}")
+        history = self.test_history.get(source, {})
+        self.summary_table.delete(*self.summary_table.get_children())
+        for index, speed in enumerate(COMMON_SPEEDS):
+            values = list(history.get(parse_speed(speed), ()))[-count:]
+            stats = ("—", "—", "—")
+            if values:
+                stats = tuple(f"{value * 1000:.3f}" for value in (
+                    sum(values) / len(values), min(values), max(values)
+                ))
+            self.summary_table.insert(
+                "", "end", values=(speed, f"{len(values)}/{count}", *stats),
+                tags=("alternate",) if index % 2 else (),
+            )
+
+    def _record_summary(self, result: AnalysisResult, nominal_s: float):
+        exposure = result.exposure_average_s
+        if not np.isfinite(exposure) or exposure <= 0:
+            return
+        history = self.test_history.setdefault(self.input_var.get(), {})
+        history.setdefault(nominal_s, deque(maxlen=20)).append(exposure)
+        self._refresh_summary()
+
+    def _clear_summary(self):
+        self.test_history.pop(self.input_var.get(), None)
+        self._refresh_summary()
+
     def refresh_input_devices(self):
         selected = self.input_var.get()
         self.device_map = {"Simulator": None}
@@ -1381,6 +1492,7 @@ class ShutterTesterApp:
 
     def _input_changed(self, _event=None):
         self.cancel_live_test(silent=True)
+        self._refresh_summary()
         selected = self.input_var.get()
         device_index = self.device_map.get(selected)
 
@@ -1401,13 +1513,14 @@ class ShutterTesterApp:
         try:
             self._start_audio_stream(device_index)
             self.test_button.configure(
-                text="ARM LIVE INPUT",
+                text="RESUME LIVE LISTENING",
                 command=self.arm_live_test,
             )
             self.secondary_button.configure(
-                text="CANCEL LIVE TEST",
+                text="PAUSE LIVE LISTENING",
                 command=self.cancel_live_test,
             )
+            self.arm_live_test()
         except Exception as exc:
             self.input_status_var.set(f"Audio input error: {exc}")
             messagebox.showerror("Audio input", str(exc))
@@ -1485,7 +1598,7 @@ class ShutterTesterApp:
             f"Streaming continuously: {dev['name']} — 2 ch @ {fs:,} Hz"
         )
         self.status_var.set(
-            "Live stream running — select shutter speed and press ARM LIVE INPUT"
+            "Live stream running — listening automatically for shutter events"
         )
 
     def _stop_audio_stream(self):
@@ -1510,12 +1623,29 @@ class ShutterTesterApp:
     # ------------------------------------------------------------------
 
     def arm_live_test(self):
+        if self.audio_buffer is None or self.audio_fs is None:
+            return
+        if self.live_listening:
+            return
+        self.live_listening = True
+        self._wait_for_live_baseline()
+        self.status_var.set("Live listening — collecting a fresh noise baseline…")
+
+    def _wait_for_live_baseline(self):
+        # Let the previous shutter's transients decay before estimating noise.
+        self.live_state = "settling"
+        self.live_ready_index = self.audio_buffer.bounds()[1] + int(
+            LIVE_BASELINE_SECONDS * self.audio_fs
+        )
+
+    def _arm_live_capture(self):
         try:
             if self.audio_stream is None or self.audio_buffer is None or self.audio_fs is None:
                 raise RuntimeError("Select a live audio input first.")
 
             nominal_s = parse_speed(self.nominal_var.get())
             expected_ms = self._parse_expected_travel_ms()
+            sensor_spacing_mm = self._parse_sensor_spacing_mm()
             fs = self.audio_fs
 
             baseline_frames = int(LIVE_BASELINE_SECONDS * fs)
@@ -1537,6 +1667,8 @@ class ShutterTesterApp:
 
             self.live_nominal_s = nominal_s
             self.live_expected_travel_ms = expected_ms
+            self.live_sensor_spacing_mm = sensor_spacing_mm
+            self.live_opening_polarities = np.ones(2)
             self.live_transient_mode = uses_transient_method(nominal_s, expected_ms)
             self.live_baseline = med.astype(np.float64)
             self.live_threshold = threshold.astype(np.float64)
@@ -1551,23 +1683,6 @@ class ShutterTesterApp:
             self.live_close_indices = [None, None]
 
             self.live_state = "armed"
-            self.result = None
-            self._clear_result_values()
-            self._set_indicator(None)
-            self._set_small_indicator(
-                self.travel1_indicator_canvas,
-                self.travel1_indicator_circle,
-                self.travel1_status_var,
-                self.travel1_status_label,
-                None,
-            )
-            self._set_small_indicator(
-                self.travel2_indicator_canvas,
-                self.travel2_indicator_circle,
-                self.travel2_status_var,
-                self.travel2_status_label,
-                None,
-            )
 
             mode_text = (
                 "edge mode: waiting for opening then both closing transients"
@@ -1575,22 +1690,21 @@ class ShutterTesterApp:
                 else "fast/template mode: waiting for shutter pulse"
             )
             self.status_var.set(
-                f"ARMED — {mode_text}. Trigger thresholds: "
+                f"LISTENING — {mode_text}. Trigger thresholds: "
                 f"S1 {threshold[0]:.4f}, S2 {threshold[1]:.4f}"
             )
-            self.tolerance_detail_var.set("Armed — waiting for the next shutter event.")
 
         except Exception as exc:
-            messagebox.showerror("Live shutter test", str(exc))
+            self.live_listening = False
+            self.live_state = "idle"
+            self.status_var.set(f"Live listening paused: {exc}")
 
     def cancel_live_test(self, silent=False):
+        self.live_listening = False
         if self.live_state != "idle":
             self.live_state = "idle"
             if not silent:
-                self.status_var.set("Live test cancelled — audio stream is still running")
-                self.tolerance_detail_var.set(
-                    "Live capture cancelled. Press ARM LIVE INPUT for another test."
-                )
+                self.status_var.set("Live listening paused — press RESUME LIVE LISTENING to continue")
 
     def _poll_live_input(self):
         try:
@@ -1600,13 +1714,28 @@ class ShutterTesterApp:
                 self.input_status_var.set(f"Audio stream warning: {err}")
 
             if (
-                self.live_state != "idle"
+                self.live_listening
                 and self.audio_buffer is not None
                 and self.audio_fs is not None
             ):
-                self._process_live_samples()
+                if self.live_state == "idle":
+                    self._wait_for_live_baseline()
+                if self.live_state == "settling":
+                    if self.audio_buffer.bounds()[1] >= self.live_ready_index:
+                        self._arm_live_capture()
+                else:
+                    # Settings apply to the next event, never halfway through one.
+                    if self.live_state == "armed" and (
+                        self.live_nominal_s != parse_speed(self.nominal_var.get())
+                        or self.live_expected_travel_ms != self._parse_expected_travel_ms()
+                        or self.live_sensor_spacing_mm != self._parse_sensor_spacing_mm()
+                    ):
+                        self._arm_live_capture()
+                    if self.live_listening and self.live_state != "idle":
+                        self._process_live_samples()
 
         except Exception as exc:
+            self.live_listening = False
             self.live_state = "idle"
             self.status_var.set(f"Live input error: {exc}")
             self._show_incomplete(
@@ -1640,11 +1769,13 @@ class ShutterTesterApp:
 
         centered = chunk.astype(np.float64) - self.live_baseline[None, :]
 
-        # Detect positive opening features independently on each channel.
+        # The first excursion establishes opening polarity independently per sensor.
+        # Some sensor circuits invert the signal: opening negative, closing positive.
         for c in range(2):
             if not self.live_open_seen[c]:
-                hits = np.flatnonzero(centered[:, c] >= self.live_threshold[c])
+                hits = np.flatnonzero(np.abs(centered[:, c]) >= self.live_threshold[c])
                 if len(hits):
+                    self.live_opening_polarities[c] = np.sign(centered[int(hits[0]), c])
                     idx = scan_start + int(hits[0])
                     self.live_open_seen[c] = True
                     self.live_open_indices[c] = idx
@@ -1685,9 +1816,9 @@ class ShutterTesterApp:
                     f"{capture_s * 1000:.1f} ms for template analysis."
                 )
 
-        # For edge-mode exposures, closing transients are negative excursions.
+        # Closing must have the opposite polarity to that channel's opening.
         if self.live_state == "waiting_close":
-            # Don't accept a negative sample occurring before that channel opened.
+            # Don't accept a closing sample before that channel opened.
             for c in range(2):
                 if self.live_open_seen[c] and not self.live_close_seen[c]:
                     opened_at = self.live_open_indices[c]
@@ -1698,7 +1829,7 @@ class ShutterTesterApp:
                     if min_rel >= len(centered):
                         continue
 
-                    tail = centered[min_rel:, c]
+                    tail = centered[min_rel:, c] * self.live_opening_polarities[c]
                     hits = np.flatnonzero(tail <= -self.live_threshold[c])
                     if len(hits):
                         idx = scan_start + min_rel + int(hits[0])
@@ -1800,6 +1931,8 @@ class ShutterTesterApp:
                 self.live_nominal_s,
                 fs=fs,
                 expected_travel_ms=self.live_expected_travel_ms,
+                sensor_spacing_mm=self.live_sensor_spacing_mm,
+                opening_polarities=tuple(self.live_opening_polarities),
             )
 
             self.samples = samples
@@ -1810,6 +1943,7 @@ class ShutterTesterApp:
 
             self._update_results(result, self.live_nominal_s)
             self._update_plot(samples, result, fs=fs, source_label="live input")
+            self._record_summary(result, self.live_nominal_s)
 
             measured_text = format_speed(result.exposure_average_s)
             error_stops = stops_from_nominal(
@@ -1854,6 +1988,12 @@ class ShutterTesterApp:
         value = float(self.expected_travel_var.get().strip())
         if value <= 0:
             raise ValueError("Expected curtain travel time must be positive.")
+        return value
+
+    def _parse_sensor_spacing_mm(self) -> float:
+        value = float(self.sensor_spacing_var.get().strip())
+        if not np.isfinite(value) or not 0 < value <= GATE_MM:
+            raise ValueError(f"Sensor spacing must be greater than 0 and at most {GATE_MM:g} mm.")
         return value
 
     @staticmethod
@@ -2004,6 +2144,7 @@ class ShutterTesterApp:
         try:
             nominal_s = parse_speed(self.nominal_var.get())
             expected_travel_ms = self._parse_expected_travel_ms()
+            sensor_spacing_mm = self._parse_sensor_spacing_mm()
 
             if self.follow_nominal_var.get():
                 self.actual_var.set(self.nominal_var.get())
@@ -2034,6 +2175,7 @@ class ShutterTesterApp:
                 fs=PREFERRED_FS,
                 travel_ms=actual_first_travel_ms,
                 second_travel_ms=actual_second_travel_ms,
+                sensor_spacing_mm=sensor_spacing_mm,
             )
 
             self.status_var.set("Analyzing…")
@@ -2044,6 +2186,7 @@ class ShutterTesterApp:
                 nominal_s,
                 fs=PREFERRED_FS,
                 expected_travel_ms=expected_travel_ms,
+                sensor_spacing_mm=sensor_spacing_mm,
             )
 
             self.samples = samples
@@ -2061,6 +2204,7 @@ class ShutterTesterApp:
             )
 
             actual_text = format_speed(actual_s)
+            self._record_summary(result, nominal_s)
             measured_text = format_speed(result.exposure_average_s)
             error_stops = stops_from_nominal(
                 result.exposure_average_s,
@@ -2283,6 +2427,58 @@ def self_test():
         )
         assert np.isfinite(r.exposure_average_s), speed
         assert r.exposure_average_s > 0, speed
+
+        for polarities in ((-1.0, -1.0), (-1.0, 1.0)):
+            inverted = analyze_signal(
+                samples * np.asarray(polarities), nominal,
+                opening_polarities=polarities,
+            )
+            assert inverted.event_indices == r.event_indices, (speed, polarities)
+            assert inverted.exposure_average_s == r.exposure_average_s
+
+    # Spacing changes the delay-to-travel conversion, not exposure duration.
+    nominal = parse_speed("1/30")
+    samples, _ = simulate_shutter(nominal, noise_rms=0.0, sensor_spacing_mm=11.0)
+    spaced = analyze_signal(samples, nominal, sensor_spacing_mm=11.0)
+    default_spacing = analyze_signal(samples, nominal)
+    assert np.isclose(spaced.exposure_average_s, default_spacing.exposure_average_s)
+    assert np.isclose(spaced.first_curtain_full_travel_s,
+                      2 * default_spacing.first_curtain_full_travel_s)
+    assert abs(spaced.first_curtain_full_travel_s - CURTAIN_TRAVEL_MS / 1000) < 0.0001
+
+    # Feed live detection in separate polling chunks: opening must be retained
+    # for negative and mixed-polarity sensors, with closing detected later.
+    from types import SimpleNamespace
+    for polarities in ((1.0, 1.0), (-1.0, -1.0), (-1.0, 1.0)):
+        live_samples = samples * np.asarray(polarities)
+        app = SimpleNamespace(
+            audio_buffer=StereoRingBuffer(len(samples) * 2), audio_fs=PREFERRED_FS,
+            live_scan_index=0, live_baseline=np.zeros(2),
+            live_threshold=np.full(2, LIVE_MIN_TRIGGER),
+            live_opening_polarities=np.ones(2), live_state="armed",
+            live_open_seen=[False, False], live_close_seen=[False, False],
+            live_open_indices=[None, None], live_close_indices=[None, None],
+            live_first_open_index=None, live_deadline_index=None,
+            live_capture_end_index=None, live_transient_mode=True,
+            live_nominal_s=nominal, live_expected_travel_ms=CURTAIN_TRAVEL_MS,
+            status_var=SimpleNamespace(set=lambda text: None), captured=False,
+        )
+        def finish():
+            app.captured = True
+            app.live_state = "idle"
+        def timeout():
+            raise AssertionError(f"Live detection timed out for {polarities}")
+        app._finish_live_capture = finish
+        app._live_timeout = timeout
+        step = int(0.020 * PREFERRED_FS)
+        for start in range(0, len(live_samples), step):
+            app.audio_buffer.write(live_samples[start:start + step])
+            ShutterTesterApp._process_live_samples(app)
+            if app.captured:
+                break
+        assert app.captured, polarities
+        assert app.live_first_open_index < int(0.020 * PREFERRED_FS)
+        assert np.array_equal(app.live_opening_polarities, polarities)
 
     # Ring-buffer wrap sanity.
     rb = StereoRingBuffer(100)
