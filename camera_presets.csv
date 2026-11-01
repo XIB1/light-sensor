@@ -77,7 +77,7 @@ Nikon F60 / N60,24,1/125,7.0,estimate,,,,,,
 Nikon F65 / N65,24,1/90,9.0,estimate,,,,,,
 Nikon F70 / N70,24,1/125,7.0,estimate,,,,,,
 Nikon F75 / N75,24,1/90,9.0,estimate,,,,,,
-Nikon F80 / N80,24,1/125,7.0,estimate,,,,,,
+Nikon F80 / N80,21,1/125,5.25,factory,,5.0,5.5,,"Repair manual inspection criteria R1: curtain travel 5.25 +/-0.25 ms over the EF-8000 tester's 21 mm spacing. Reference distance is 21 mm, not full-gate travel.",https://www.scribd.com/document/1047121120/Nikon-f80-f80d-f80s-n80-n80qd-Repair
 Nikon F90 / N90,24,1/250,3.0,estimate,,,,,,
 Nikon F90X / N90s,24,1/250,3.0,estimate,,,,,,
 Nikon FA,24,1/250,3.0,family,,,,,"SPT trade reference: 2.5 ms over 20 mm, alternatively 3.0 ms over 24 mm. 24 mm value used here; no explicit factory tolerance confirmed.",https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times

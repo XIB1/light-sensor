@@ -30,15 +30,18 @@ sounddevice is only required for live audio; Simulator mode works without it.
 from __future__ import annotations
 
 import csv
+import json
 import math
 import time
 import threading
 import tkinter as tk
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import ttk, messagebox
 from typing import Optional
+from uuid import uuid4
 
 import numpy as np
 
@@ -61,7 +64,7 @@ except Exception:
 FS = 96_000
 DEFAULT_GATE_MM = 24.0
 DEFAULT_APERTURE_MM = 2.0
-DEFAULT_SPACING_MM = 22.0
+DEFAULT_SPACING_MM = 21.0
 DEFAULT_TRAVEL_MS = 3.3
 DEFAULT_AC_HZ = 35.0
 SENSOR_TAU_US = 7.0
@@ -358,6 +361,13 @@ def format_stop_error(stops):
     return f"{stops:+.2f} stops ({direction})"
 
 
+def format_summary_measurement(seconds, nominal_s):
+    stops = stops_from_nominal(seconds, nominal_s)
+    if abs(stops) < 0.005:
+        stops = 0.0
+    return f"{seconds * 1000:.3f} ({stops:+.2f} stops)"
+
+
 def curtain_speed_m_s(travel_s, path_mm):
     if travel_s <= 0:
         return float("nan")
@@ -401,13 +411,15 @@ def simulate_shutter(exposure_s, travel1_ms, travel2_ms, path_mm, spacing_mm, ap
     v1 = path_mm / (travel1_ms / 1000.0)
     v2 = path_mm / (travel2_ms / 1000.0)
 
-    # Put the two sensor centers symmetrically around the frame center.
+    # path_mm is a service reference distance, not a physical frame boundary.
+    # Preserve the specified spacing even when it equals that reference.
     x1 = max(aperture_mm / 2.0, (path_mm - spacing_mm) / 2.0)
-    x2 = min(path_mm - aperture_mm / 2.0, x1 + spacing_mm)
+    x2 = x1 + spacing_mm
 
     pre = 0.020
     post = 0.050
-    total = pre + exposure_s + max(travel1_ms, travel2_ms) / 1000.0 + post
+    travel_extent = max(path_mm, x2 + aperture_mm / 2.0) / path_mm
+    total = pre + exposure_s + max(travel1_ms, travel2_ms) / 1000.0 * travel_extent + post
     n = max(256, int(math.ceil(total * fs)))
     t = np.arange(n) / fs - pre
 
@@ -445,6 +457,90 @@ class AnalysisResult:
     sensor_mismatch_percent: float
     confidence: float
     event_indices: dict
+
+
+def infer_sensor_channels(event_indices):
+    """Return physical input channels in curtain-arrival order, or no order.
+
+    Raw result fields and event keys continue to identify physical channels.
+    Opening times establish one consistent order for both exposure readings.
+    """
+    first = event_indices.get("sensor1_open")
+    second = event_indices.get("sensor2_open")
+    if first is None or second is None or first == second:
+        return None
+    return (1, 2) if first < second else (2, 1)
+
+
+def write_debug_capture(directory, raw_samples, samples, settings, result=None,
+                        error=None, analysis_start_frame=0, assessment=None):
+    """Save a replayable capture and readable report without pickle objects.
+
+    Event indices in result refer to samples. raw_event_indices refer to the
+    original, untrimmed raw_samples; both arrays retain the recorded polarity.
+    """
+    captured_at = datetime.now(timezone.utc)
+    report = {
+        "schema_version": 1,
+        "captured_at_utc": captured_at.isoformat(),
+        "outcome": "completed" if result is not None and error is None else "rejected",
+        "settings": settings,
+        "analysis_start_frame": analysis_start_frame,
+        "raw_sample_count": len(raw_samples),
+        "analysis_sample_count": len(samples),
+        "result": asdict(result) if result is not None else None,
+        "error": error,
+        "assessment": assessment,
+    }
+    if result is not None:
+        fs = settings["sample_rate_hz"]
+        nominal = settings["nominal_s"]
+        path_mm = settings["reference_distance_mm"]
+        channels = infer_sensor_channels(result.event_indices)
+        report["sensor_order"] = {
+            "basis": "opening time",
+            "resolved": channels is not None,
+            "first_input_channel": channels[0] if channels else None,
+            "second_input_channel": channels[1] if channels else None,
+            "result_field_numbering": "physical input channel",
+        }
+        report["raw_event_indices"] = {
+            name: int(index) + analysis_start_frame
+            for name, index in result.event_indices.items()
+        }
+        report["event_times_s"] = {
+            name: index / fs for name, index in result.event_indices.items()
+        }
+        report["derived"] = {
+            "average_error_stops": stops_from_nominal(result.exposure_average_s, nominal),
+            "sensor_1_error_stops": stops_from_nominal(result.exposure_sensor_1_s, nominal),
+            "sensor_2_error_stops": stops_from_nominal(result.exposure_sensor_2_s, nominal),
+            "first_curtain_speed_m_s": curtain_speed_m_s(result.first_curtain_full_travel_s, path_mm),
+            "second_curtain_speed_m_s": curtain_speed_m_s(result.second_curtain_full_travel_s, path_mm),
+            "curtain_speed_mismatch_percent": curtain_speed_mismatch_percent(
+                result.first_curtain_full_travel_s, result.second_curtain_full_travel_s),
+        }
+
+    def json_value(value):
+        if isinstance(value, dict):
+            return {key: json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_value(item) for item in value]
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
+
+    report_text = json.dumps(json_value(report), indent=2, ensure_ascii=False, allow_nan=False)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    name = captured_at.strftime("%Y%m%dT%H%M%S_%fZ") + "_" + uuid4().hex[:8]
+    archive = directory / f"{name}.npz"
+    np.savez_compressed(archive, raw_samples=raw_samples, samples=samples,
+                        metadata_json=np.asarray(report_text))
+    archive.with_suffix(".json").write_text(report_text, encoding="utf-8")
+    return archive
 
 
 def _edge_measure_ac(channel, fs, nominal_s):
@@ -517,7 +613,7 @@ def _make_ac_template(exposure_s, fs, expected_travel_ms, path_mm, aperture_mm):
     return y, int(round(pre_s * fs))
 
 
-def _best_normalized_match(signal, template):
+def _best_normalized_match(signal, template, allow_inverted=False):
     """Normalized sliding correlation; returns score and start index."""
     x = np.asarray(signal, dtype=float)
     t = np.asarray(template, dtype=float)
@@ -537,6 +633,8 @@ def _best_normalized_match(signal, template):
     energy = sums2 - (sums*sums)/n
     denom = np.sqrt(np.maximum(energy, 1e-12))
     score = corr / denom
+    if allow_inverted:
+        score = np.abs(score)
     best = int(np.argmax(score))
     return float(score[best]), best
 
@@ -577,16 +675,15 @@ def _template_measure_ac(channel, fs, nominal_s, expected_travel_ms, path_mm, ap
         template, open_offset = _make_ac_template(
             float(exposure_s), fs, expected_travel_ms, path_mm, aperture_mm
         )
-        score, start = _best_normalized_match(segment, template)
-        inverted_score, inverted_start = _best_normalized_match(-segment, template)
-        if inverted_score > score:
-            score, start = inverted_score, inverted_start
+        score, start = _best_normalized_match(segment, template, allow_inverted=True)
         if score > best_score:
             best_score = score
             best_s = float(exposure_s)
             best_start = lo + start
             best_open_offset = open_offset
 
+    if best_score < 0.6:
+        raise ValueError("No reliable AC pulse fit; check signal, optical aperture and expected travel")
     open_idx = best_start + best_open_offset
     close_idx = open_idx + int(round(best_s * fs))
     confidence = float(np.clip(best_score, 0.0, 1.0))
@@ -626,8 +723,23 @@ def _edge_measure_dc(channel, fs, nominal_s):
     return measured, open_idx, close_idx, conf
 
 
+def ac_pulses_overlap(exposure_s, crossing_s, fs):
+    """Leave a margin for finite aperture, audio filtering and sample resolution."""
+    return exposure_s <= max(4.0 * crossing_s, 16.0 / fs)
+
+
+def waveform_view_bounds(event_indices, sample_count, fs=FS):
+    """Show the measured event with proportional padding, rather than idle audio."""
+    indices = [i for i in event_indices.values() if 0 <= i < sample_count]
+    if not indices:
+        return 0, sample_count
+    first, last = min(indices), max(indices)
+    padding = max(int(math.ceil(0.0005 * fs)), int(math.ceil((last - first) * 0.15)))
+    return max(0, first - padding), min(sample_count, last + padding + 1)
+
+
 def analyze_signal(stereo, nominal_s, expected_travel_ms, path_mm, spacing_mm, aperture_mm,
-                   coupling="AC coupled", fs=FS):
+                   coupling="AC coupled", fs=FS, ac_method="Auto"):
     stereo = np.asarray(stereo)
     if stereo.ndim != 2 or stereo.shape[1] < 2:
         raise ValueError("Expected stereo input with two channels")
@@ -638,11 +750,21 @@ def analyze_signal(stereo, nominal_s, expected_travel_ms, path_mm, spacing_mm, a
     # overlap, fit the entire expected pulse shape. Otherwise use edges.
     expected_travel_s = expected_travel_ms / 1000.0
     sensor_crossing_s = aperture_mm * expected_travel_s / path_mm
-    use_template = (
-        coupling.startswith("AC")
-        and sensor_crossing_s > 0
-        and nominal_s / sensor_crossing_s < 1.8
+    is_ac = coupling.startswith("AC")
+    use_template = is_ac and (
+        ac_method == "AC pulse fit"
+        or (ac_method == "Auto" and ac_pulses_overlap(nominal_s, sensor_crossing_s, fs))
     )
+
+    # A selected slow speed may actually fire fast. In Auto mode, use the
+    # observed duration too, and apply the same method to both sensors.
+    edge_results = None
+    if is_ac and not use_template:
+        edge_results = [_edge_measure_ac(stereo[:, c], fs, nominal_s) for c in range(2)]
+        if ac_method == "Auto" and any(
+            ac_pulses_overlap(result[0], sensor_crossing_s, fs) for result in edge_results
+        ):
+            use_template = True
 
     measurements, opens, closes, confs = [], [], [], []
     for c in range(2):
@@ -651,7 +773,7 @@ def analyze_signal(stereo, nominal_s, expected_travel_ms, path_mm, spacing_mm, a
                 stereo[:, c], fs, nominal_s, expected_travel_ms, path_mm, aperture_mm
             )
         elif coupling.startswith("AC"):
-            exp, oi, ci, conf = _edge_measure_ac(stereo[:, c], fs, nominal_s)
+            exp, oi, ci, conf = edge_results[c]
         else:
             exp, oi, ci, conf = _edge_measure_dc(stereo[:, c], fs, nominal_s)
         measurements.append(exp)
@@ -745,6 +867,7 @@ class ShutterTesterApp:
 
         self.samples = None
         self.result = None
+        self.result_context = None
         self.audio_stream = None
         self.live_chunks = deque()
         self.live_samples = 0
@@ -760,12 +883,16 @@ class ShutterTesterApp:
         self.camera_var = tk.StringVar(value="Nikon FE2")
         self.camera_info_var = tk.StringVar(value="")
         self.path_var = tk.StringVar(value="24")
-        self.spacing_var = tk.StringVar(value="22")
+        self.spacing_var = tk.StringVar(value=f"{DEFAULT_SPACING_MM:g}")
         self.aperture_var = tk.StringVar(value="2")
         self.expected_travel_var = tk.StringVar(value="3.3")
         self.travel_tolerance_var = tk.StringVar(value="Auto (service / ±5%)")
         self.mismatch_tolerance_var = tk.StringVar(value="Auto (service / ±5%)")
         self.coupling_var = tk.StringVar(value="AC coupled")
+        self.ac_method_var = tk.StringVar(value="Auto")
+        self.debug_mode_var = tk.BooleanVar(value=False)
+        self.debug_status_var = tk.StringVar(value="Debug recording off")
+        self.debug_directory = Path(__file__).resolve().parent / "debug_captures"
 
         self.source_var = tk.StringVar(value="Simulator")
         self.actual_var = tk.StringVar(value="1/1000")
@@ -782,6 +909,19 @@ class ShutterTesterApp:
         self.variance_var = tk.StringVar(value="—")
         self.s1_variance_var = tk.StringVar(value="—")
         self.s2_variance_var = tk.StringVar(value="—")
+        self.s1_channel_var = tk.StringVar(value="Waiting for timing")
+        self.s2_channel_var = tk.StringVar(value="Waiting for timing")
+        self.s1_duration_var = tk.StringVar(value="—")
+        self.s2_duration_var = tk.StringVar(value="—")
+        self.avg_duration_var = tk.StringVar(value="—")
+        self.avg_variance_var = tk.StringVar(value="—")
+        self.first_sensor_title_var = tk.StringVar(value="First sensor")
+        self.second_sensor_title_var = tk.StringVar(value="Second sensor")
+        self.sensor_order_var = tk.StringVar(value="Sensor order will be inferred from opening times.")
+        self.exposure_status_vars = {
+            name: tk.StringVar(value="NOT TESTED") for name in ("first", "average", "second")
+        }
+        self.exposure_status_labels = {}
         self.travel1_var = tk.StringVar(value="—")
         self.travel2_var = tk.StringVar(value="—")
         self.mismatch_var = tk.StringVar(value="—")
@@ -904,6 +1044,23 @@ class ShutterTesterApp:
         coupling.bind("<<ComboboxSelected>>", lambda _e: self._clear_live_state())
         ttk.Label(src, text="Live sources listen continuously; fire the camera whenever ready.",
                   wraplength=330).grid(row=2, column=0, columnspan=3, sticky="w", pady=(3,0))
+        ttk.Label(src, text="AC analysis:").grid(row=3, column=0, sticky="w", padx=(0, 6))
+        ac_method = ttk.Combobox(
+            src, textvariable=self.ac_method_var,
+            values=["Auto", "AC pulse fit", "AC transient edges"], state="readonly",
+        )
+        ac_method.grid(row=3, column=1, columnspan=2, sticky="ew", pady=2)
+        ac_method.bind("<<ComboboxSelected>>", lambda _e: self._clear_live_state())
+        ttk.Checkbutton(
+            src, text="Debug mode: save every test", variable=self.debug_mode_var,
+            command=lambda: self.debug_status_var.set(
+                f"Saving to {self.debug_directory}" if self.debug_mode_var.get()
+                else "Debug recording off"
+            ),
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        ttk.Label(src, textvariable=self.debug_status_var, wraplength=330).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=2
+        )
         src.columnconfigure(1, weight=1)
 
         # Camera preset
@@ -957,9 +1114,10 @@ class ShutterTesterApp:
                      values=list(MISMATCH_TOLERANCE_OPTIONS), state="readonly", width=10).grid(
             row=6, column=1, columnspan=2, sticky="ew", pady=2)
         ttk.Label(geom, text="Exposure tolerance:").grid(row=7, column=0, sticky="w", padx=(0,5), pady=2)
-        ttk.Combobox(geom, textvariable=self.tolerance_var,
-                     values=list(TOLERANCE_OPTIONS), state="readonly", width=12).grid(
-            row=7, column=1, columnspan=2, sticky="ew", pady=2)
+        exposure_tolerance = ttk.Combobox(geom, textvariable=self.tolerance_var,
+                                        values=list(TOLERANCE_OPTIONS), state="readonly", width=12)
+        exposure_tolerance.grid(row=7, column=1, columnspan=2, sticky="ew", pady=2)
+        exposure_tolerance.bind("<<ComboboxSelected>>", self._refresh_result_assessment)
         ttk.Label(geom, text="Auto uses the service-manual travel range / mismatch limit when stored in the camera CSV; "
                              "otherwise it falls back to ±5%.",
                   wraplength=330).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4,0))
@@ -1013,21 +1171,50 @@ class ShutterTesterApp:
             travel, 2, "Curtain speed mismatch", self.curtain_mismatch_var, self.curtain_mismatch_status_var)
         travel.columnconfigure(2, weight=1)
 
-        metrics = ttk.LabelFrame(main, text="Measurements", padding=9)
+        metrics = ttk.Frame(main)
         metrics.pack(fill="x", pady=(8,0))
-        labels = [
-            ("Average exposure", self.avg_var), ("Sensor 1 exposure", self.s1_var),
-            ("Sensor 2 exposure", self.s2_var), ("Sensor 1 error", self.s1_variance_var),
-            ("Sensor 2 error", self.s2_variance_var), ("Sensor mismatch", self.mismatch_var),
+        for column, title_var, channel_var, exposure_var, duration_var, error_var in (
+            (0, self.first_sensor_title_var, self.s1_channel_var, self.s1_var,
+             self.s1_duration_var, self.s1_variance_var),
+            (1, None, None, self.avg_var, self.avg_duration_var, self.avg_variance_var),
+            (2, self.second_sensor_title_var, self.s2_channel_var, self.s2_var,
+             self.s2_duration_var, self.s2_variance_var),
+        ):
+            metrics.columnconfigure(column, weight=1, uniform="measurement_boxes")
+            box = ttk.LabelFrame(metrics, text="Average" if title_var is None else "", padding=10)
+            if title_var is not None:
+                box.configure(labelwidget=ttk.Label(box, textvariable=title_var))
+            box.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 4, 0 if column == 2 else 4))
+            if channel_var is not None:
+                ttk.Label(box, textvariable=channel_var, anchor="center").pack(fill="x")
+            else:
+                ttk.Label(box, text="Both sensors", anchor="center").pack(fill="x")
+            ttk.Label(box, textvariable=exposure_var, font=("TkDefaultFont", 18, "bold"),
+                      anchor="center").pack(fill="x", pady=(6, 2))
+            ttk.Label(box, textvariable=duration_var, anchor="center").pack(fill="x")
+            ttk.Label(box, textvariable=error_var, font=("TkDefaultFont", 11, "bold"),
+                      anchor="center").pack(fill="x", pady=(4, 0))
+            status_name = ("first", "average", "second")[column]
+            status_label = ttk.Label(
+                box, textvariable=self.exposure_status_vars[status_name],
+                font=("TkDefaultFont", 12, "bold"), foreground="#808080", anchor="center",
+            )
+            status_label.pack(fill="x", pady=(6, 0))
+            self.exposure_status_labels[status_name] = status_label
+        ttk.Label(metrics, textvariable=self.sensor_order_var, wraplength=740).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(5, 3)
+        )
+        details = ttk.Frame(metrics)
+        details.grid(row=2, column=0, columnspan=3, sticky="ew")
+        for column, (label, var) in enumerate((
+            ("Sensor mismatch", self.mismatch_var),
             ("Confidence", self.conf_var), ("Method", self.method_var),
-        ]
-        for i, (lab, var) in enumerate(labels):
-            r, colpair = divmod(i, 2)
-            c = colpair * 2
-            ttk.Label(metrics, text=lab + ":").grid(row=r, column=c, sticky="e", padx=(0,5), pady=1)
-            ttk.Label(metrics, textvariable=var, font=("TkDefaultFont", 10, "bold")).grid(row=r, column=c+1, sticky="w", padx=(0,18), pady=1)
-        metrics.columnconfigure(1, weight=1)
-        metrics.columnconfigure(3, weight=1)
+        )):
+            ttk.Label(details, text=label + ":").grid(row=0, column=column * 2, sticky="w", padx=(0, 5))
+            ttk.Label(details, textvariable=var, font=("TkDefaultFont", 10, "bold")).grid(
+                row=0, column=column * 2 + 1, sticky="w", padx=(0, 15)
+            )
+            details.columnconfigure(column * 2 + 1, weight=1)
 
         plot_frame = ttk.LabelFrame(main, text="Waveform / detected events", padding=5)
         plot_frame.pack(fill="both", expand=True, pady=(8,0))
@@ -1077,8 +1264,8 @@ class ShutterTesterApp:
         )
         for column, title, width in (
             ("speed", "Marked speed", 110), ("count", "Tests", 65),
-            ("average", "Average (ms)", 145), ("min", "Min (ms)", 145),
-            ("max", "Max (ms)", 145),
+            ("average", "Average (ms / stops)", 200), ("min", "Min (ms / stops)", 200),
+            ("max", "Max (ms / stops)", 200),
         ):
             self.summary_table.heading(column, text=title)
             self.summary_table.column(column, width=width, minwidth=60, anchor="center")
@@ -1090,6 +1277,9 @@ class ShutterTesterApp:
             footer, text="Current session only. Min / max refer to exposure duration."
         ).pack(side="left")
         ttk.Button(footer, text="Clear summary", command=self._clear_summary).pack(side="right")
+        ttk.Label(panel, text="Signed stops vs marked speed: + longer exposure, - shorter exposure.").pack(
+            anchor="w", pady=(4, 0)
+        )
         self._refresh_summary()
 
     def _refresh_summary(self):
@@ -1102,7 +1292,7 @@ class ShutterTesterApp:
             values = list(history.get(parse_speed(speed), ()))[-count:]
             stats = ("—", "—", "—")
             if values:
-                stats = tuple(f"{value * 1000:.3f}" for value in (
+                stats = tuple(format_summary_measurement(value, parse_speed(speed)) for value in (
                     sum(values) / len(values), min(values), max(values)
                 ))
             self.summary_table.insert(
@@ -1405,41 +1595,117 @@ class ShutterTesterApp:
         self.live_cooldown_until = now + 0.25
 
     # ------------------------- results -------------------------
+    def _debug_settings(self, source_desc):
+        return {
+            "sample_rate_hz": FS,
+            "source_kind": source_desc,
+            "input_source": self.source_var.get(),
+            "camera": self.camera_var.get(),
+            "nominal_speed": self.nominal_var.get(),
+            "reference_distance_mm_text": self.path_var.get(),
+            "sensor_spacing_mm_text": self.spacing_var.get(),
+            "optical_aperture_mm_text": self.aperture_var.get(),
+            "expected_travel_ms_text": self.expected_travel_var.get(),
+            "coupling": self.coupling_var.get(),
+            "ac_method": self.ac_method_var.get(),
+            "exposure_tolerance": self.tolerance_var.get(),
+            "travel_tolerance": self.travel_tolerance_var.get(),
+            "mismatch_tolerance": self.mismatch_tolerance_var.get(),
+            "live_trigger_floor": self.live_peak_floor,
+            "template_ac_cutoff_hz": DEFAULT_AC_HZ,
+            "template_sensor_tau_us": SENSOR_TAU_US,
+            "search_stops": SEARCH_STOPS,
+            "simulator": {
+                "actual_speed": self.actual_var.get(),
+                "first_travel_ms": self.sim_first_var.get(),
+                "second_travel_ms": self.sim_second_var.get(),
+            } if source_desc == "simulator" else None,
+        }
+
     def _analyze_and_display(self, samples, source_desc):
-        nominal = parse_speed(self.nominal_var.get())
-        path, spacing, aperture, expected_ms = self._parse_geometry()
-        if source_desc == "live audio":
-            # Preserve the opening and its baseline even after a long idle.
-            # The edge analyzer expects the event near the start of its window.
-            baseline = samples[:max(8, int(0.008 * FS))]
-            centered = samples - np.median(baseline, axis=0)
-            sigma = max(robust_sigma(baseline[:, 0]), robust_sigma(baseline[:, 1]))
-            hits = np.flatnonzero(np.any(np.abs(centered) >= max(self.live_peak_floor, 8 * sigma), axis=1))
-            if not len(hits):
-                raise ValueError("No clear shutter opening in retained audio")
-            start = max(0, int(hits[0]) - int(0.012 * FS))
-            samples = samples[start:]
-        result = analyze_signal(samples, nominal, expected_ms, path, spacing, aperture,
-                                self.coupling_var.get())
-        self.samples = samples
-        self.result = result
-        self._update_results(result, nominal, path, expected_ms)
-        self._update_plot(samples, result)
-        self._record_summary(result, nominal)
-        self.status_var.set(
-            f"Done — {source_desc}; measured {format_speed(result.exposure_average_s)}, "
-            f"error {stops_from_nominal(result.exposure_average_s, nominal):+.2f} stops"
-        )
+        debug = self.debug_mode_var.get()
+        settings = self._debug_settings(source_desc) if debug else None
+        raw_samples = samples
+        start = 0
+        result = None
+        error = None
+        assessment = None
+        try:
+            nominal = parse_speed(self.nominal_var.get())
+            path, spacing, aperture, expected_ms = self._parse_geometry()
+            if debug:
+                settings.update(nominal_s=nominal, reference_distance_mm=path,
+                                sensor_spacing_mm=spacing, optical_aperture_mm=aperture,
+                                expected_travel_ms=expected_ms)
+            if source_desc == "live audio":
+                # Keep the original buffer for debug replay before trimming idle audio.
+                baseline = samples[:max(8, int(0.008 * FS))]
+                centered = samples - np.median(baseline, axis=0)
+                sigma = max(robust_sigma(baseline[:, 0]), robust_sigma(baseline[:, 1]))
+                hits = np.flatnonzero(np.any(np.abs(centered) >= max(self.live_peak_floor, 8 * sigma), axis=1))
+                if not len(hits):
+                    raise ValueError("No clear shutter opening in retained audio")
+                start = max(0, int(hits[0]) - int(0.012 * FS))
+                samples = samples[start:]
+            result = analyze_signal(samples, nominal, expected_ms, path, spacing, aperture,
+                                    self.coupling_var.get(), ac_method=self.ac_method_var.get())
+            self.samples = samples
+            self.result = result
+            self.result_context = (nominal, path, expected_ms)
+            self._update_results(result, nominal, path, expected_ms)
+            self._update_plot(samples, result)
+            self._record_summary(result, nominal)
+            self.status_var.set(
+                f"Done — {source_desc}; measured {format_speed(result.exposure_average_s)}, "
+                f"error {stops_from_nominal(result.exposure_average_s, nominal):+.2f} stops"
+            )
+            if debug:
+                assessment = {"overall": self.pass_fail_var.get(),
+                              "detail": self.tolerance_detail_var.get()}
+        except Exception as exc:
+            error = str(exc)
+            raise
+        finally:
+            if debug:
+                try:
+                    archive = write_debug_capture(
+                        self.debug_directory, raw_samples, samples, settings, result,
+                        error, start, assessment,
+                    )
+                    self.debug_status_var.set(f"Saved: {archive.name}")
+                except Exception as exc:
+                    # Recording errors must not discard an otherwise valid measurement.
+                    self.debug_status_var.set(f"Debug save failed: {exc}")
+
+    def _refresh_result_assessment(self, _event=None):
+        if self.result is not None and self.result_context is not None:
+            self._update_results(self.result, *self.result_context)
 
     def _update_results(self, r, nominal, path_mm, expected_ms):
         self.method_var.set(r.method)
         self.avg_var.set(format_speed(r.exposure_average_s))
-        self.s1_var.set(format_speed(r.exposure_sensor_1_s))
-        self.s2_var.set(format_speed(r.exposure_sensor_2_s))
+        channels = infer_sensor_channels(r.event_indices)
+        first_channel, second_channel = channels or (1, 2)
+        exposures = {1: r.exposure_sensor_1_s, 2: r.exposure_sensor_2_s}
+        first_exposure, second_exposure = exposures[first_channel], exposures[second_channel]
+        self.s1_var.set(format_speed(first_exposure))
+        self.s2_var.set(format_speed(second_exposure))
+        self.s1_channel_var.set(f"Input channel {first_channel}")
+        self.s2_channel_var.set(f"Input channel {second_channel}")
+        self.first_sensor_title_var.set("First sensor" if channels else "Sensor A")
+        self.second_sensor_title_var.set("Second sensor" if channels else "Sensor B")
+        self.sensor_order_var.set(
+            "First/second follow the detected opening times."
+            if channels else "Opening times are indistinguishable; sensor order is unresolved."
+        )
+        self.s1_duration_var.set(f"{first_exposure * 1000:.4f} ms")
+        self.s2_duration_var.set(f"{second_exposure * 1000:.4f} ms")
+        self.avg_duration_var.set(f"{r.exposure_average_s * 1000:.4f} ms")
         avg_err = stops_from_nominal(r.exposure_average_s, nominal)
-        s1_err = stops_from_nominal(r.exposure_sensor_1_s, nominal)
-        s2_err = stops_from_nominal(r.exposure_sensor_2_s, nominal)
+        s1_err = stops_from_nominal(first_exposure, nominal)
+        s2_err = stops_from_nominal(second_exposure, nominal)
         self.variance_var.set(format_stop_error(avg_err))
+        self.avg_variance_var.set(f"{avg_err:+.2f} stops")
         self.s1_variance_var.set(f"{s1_err:+.2f} stops")
         self.s2_variance_var.set(f"{s2_err:+.2f} stops")
         self.mismatch_var.set(f"{r.sensor_mismatch_percent:.2f}%")
@@ -1457,6 +1723,14 @@ class ShutterTesterApp:
         self.travel2_var.set(travel_text(r.second_curtain_full_travel_s, t2e))
 
         exp_tol = TOLERANCE_OPTIONS[self.tolerance_var.get()]
+        exposure_passes = {}
+        for name, error in (("first", s1_err), ("average", avg_err), ("second", s2_err)):
+            passed = bool(np.isfinite(error) and abs(error) <= exp_tol)
+            exposure_passes[name] = passed
+            self.exposure_status_vars[name].set("PASS" if passed else "FAIL")
+            self.exposure_status_labels[name].configure(
+                foreground="#20743b" if passed else "#a32727"
+            )
 
         selected_travel_tol = TRAVEL_TOLERANCE_OPTIONS[self.travel_tolerance_var.get()]
         preset = CAMERA_BY_NAME.get(self.camera_var.get().strip())
@@ -1519,7 +1793,7 @@ class ShutterTesterApp:
             f"{mismatch_pct:.2f}%  |  {mismatch_ms:.3f} ms"
             if np.isfinite(mismatch_pct) and np.isfinite(mismatch_ms) else "—")
 
-        exposure_ok = np.isfinite(avg_err) and abs(avg_err) <= exp_tol
+        exposure_ok = all(exposure_passes.values())
         overall = exposure_ok and t1_ok and t2_ok and mismatch_ok
         self._set_indicator(overall)
         self._set_small_indicator(self.t1_dot, self.t1_circle, self.t1_label, self.travel1_status_var, t1_ok)
@@ -1556,12 +1830,31 @@ class ShutterTesterApp:
 
     def _update_plot(self, samples, r):
         self.ax.clear()
-        t = np.arange(len(samples)) / FS * 1000.0
-        self.ax.plot(t, samples[:,0], linewidth=0.8, label="Sensor 1")
-        self.ax.plot(t, samples[:,1], linewidth=0.8, label="Sensor 2", alpha=0.8)
+        lo, hi = waveform_view_bounds(r.event_indices, len(samples))
+        t = np.arange(lo, hi) / FS * 1000.0
+        channels = infer_sensor_channels(r.event_indices)
+        order = channels or (1, 2)
+        for position, channel in enumerate(order):
+            name = ("First sensor", "Second sensor")[position] if channels else f"Sensor {'AB'[position]}"
+            self.ax.plot(t, samples[lo:hi, channel - 1], linewidth=0.8,
+                         color=f"C{position}", label=f"{name} (input channel {channel})")
+        estimated = "fit" in r.method.lower()
         for key, idx in r.event_indices.items():
             if 0 <= idx < len(samples):
-                self.ax.axvline(idx / FS * 1000.0, linewidth=0.8, alpha=0.4)
+                channel = 1 if key.startswith("sensor1") else 2
+                sensor = order.index(channel) + 1
+                opening = key.endswith("open")
+                label = f"{'S' + str(sensor) if channels else 'CH' + str(channel)} {'open' if opening else 'close'}"
+                if estimated:
+                    label += " (fit)"
+                self.ax.axvline(
+                    idx / FS * 1000.0, linewidth=1.0, alpha=0.65,
+                    color=f"C{sensor - 1}", linestyle="--" if opening else ":",
+                    label=label,
+                )
+        if hi - lo > 1:
+            self.ax.set_xlim(t[0], t[-1])
+        self.ax.set_title(f"{r.method}" + (" — opening/closing times estimated from pulse shape" if estimated else ""))
         self.ax.set_xlabel("Time (ms)")
         self.ax.set_ylabel("Amplitude")
         self.ax.grid(True, alpha=0.2)
