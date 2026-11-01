@@ -1,0 +1,149 @@
+﻿name,reference_distance_mm,x_sync,travel_ms,travel_quality,service_travel_tolerance_pct,service_travel_min_ms,service_travel_max_ms,service_mismatch_max_ms,note,source_url
+Canon A-1,34,1/60,11.3,factory,,11.0,11.6,,Service manual: curtain travel time 11.3 ±0.3 ms over 34 mm.,https://www.manualslib.com/manual/4320926/Canon-A-1.html
+Canon AE-1,34,1/60,10.5,factory,,10.2,10.8,0.1,Service manual: 10.5 ±0.3 ms over Canon 34 mm tester spacing; 1st-to-2nd curtain difference 0.1 ms maximum.,https://fliphtml5.com/nbhs/unyu/CANON_AE-1_-_Service_manual/
+Canon AE-1 Program,34,1/60,10.5,factory,,10.2,10.8,0.1,Factory service manual: curtain travel 10.5 ±0.3 ms; 1st-to-2nd curtain difference 0.1 ms maximum.,https://fliphtml5.com/nbhs/unyu/CANON_AE-1_-_Service_manual/
+Canon AT-1,34,1/60,10.5,family,,10.2,10.8,0.1,AT-1 service documentation explicitly refers to AE-1 shutter-curtain adjustment sections; uses AE-1 shutter service values.,https://www.scribd.com/document/618135005/Canon-AE-1-At1-Service
+Canon AV-1,36,1/60,11.1,family,,,,,A-series horizontal focal-plane shutter; dedicated service travel tolerance not yet entered.,
+Canon EOS 5 / A2 / A2E,24,1/200,3.2,estimate,,,,,Vertical shutter; service travel value not yet entered.,
+Canon EOS 620,24,1/250,3.0,estimate,,,,,Popular early EOS vertical shutter; service travel value not yet entered.,
+Canon EOS 650,24,1/125,4.5,estimate,,,,,Popular early EOS vertical shutter; service travel value not yet entered.,
+Canon EOS-1,24,1/250,2.8,estimate,,,,,Professional vertical shutter; service travel value not yet entered.,
+Canon F-1 (original),32,1/60,11.0,estimate,,10.7,11.3,,"SPT professional-repair reference: 11.0 ±0.3 ms over 32 mm at 1/2000 (also 13.0 ±0.5 ms edge-to-edge). Tolerance is SPT/trade data, not independently re-confirmed here from the factory manual.",https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Canon FTb,34,1/60,13.75,factory,,13.0,14.5,,Service manual: curtain speed 13.0–14.5 ms using 34 mm Slit-4 tester.,https://fliphtml5.com/nbhs/homu/CANON_FTb_-_Service_manual/
+Canon New F-1,34,1/90,7.5,factory,,7.3,7.7,,Service manual: curtain travel 7.5 ±0.2 ms over 34 mm slit spacing.,https://www.manualshelf.com/manual/canon/f-1-new/service-manual-english.html
+Canon T50,20,1/60,7.5,estimate,,,,,SPT trade reference: 7.5 ms over 20 mm. Secondary calibration reference; no explicit tolerance listed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Canon T70,24,1/125,7.2,estimate,,,,,SPT trade reference: 7.2 ms over 24 mm (alternatively 6.25 ms over 20 mm). Secondary calibration reference; no explicit tolerance listed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Canon T90,20,1/250,2.7,factory,,2.5,2.9,,Service documentation: curtain travel 2.7 ±0.2 ms on the service tester; SPT material identifies a 20 mm reference distance.,https://manualzz.com/doc/63314540/canon-t-90-service-manual
+"Generic — horizontal cloth/foil, medium (~14.5 ms)",36,varies,14.5,estimate,,,,,,
+"Generic — horizontal cloth/foil, slow (~18 ms)",36,varies,18.0,estimate,,,,,,
+"Generic — horizontal foil, fast (~10 ms)",36,varies,10.0,estimate,,,,,,
+"Generic — vertical metal, fast (~3.3 ms)",24,~1/250,3.3,estimate,,,,,,
+"Generic — vertical metal, older (~7 ms)",24,~1/125,7.0,estimate,,,,,,
+"Generic — vertical metal/carbon, very fast (~2.5–3 ms)",24,~1/250–1/300,2.7,estimate,,,,,,
+Minolta Maxxum 7000 / Dynax 7000 / α-7000,20,1/100,6.0,factory,,,,,Service manual: curtain travel 6 ms over 20 mm (7.2 ms over 24 mm); no explicit tolerance located.,https://fliphtml5.com/nbhs/wfhc/Minolta-Maxxum-7000_-_Service_manual/
+Minolta Maxxum 9 / Dynax 9,24,1/300,1.8,family,,,,,Later development of the 9xi high-speed shutter family; use as a starting value pending service-manual tolerance.,https://en.wikipedia.org/wiki/Focal-plane_shutter
+Minolta Maxxum 9000,24,1/250,3.0,estimate,,,,,Professional vertical shutter; dedicated service travel value not yet entered.,
+Minolta Maxxum 9xi / Dynax 9xi,24,1/300,1.8,factory,,,,,Published shutter design travel time about 1.8 ms over 24 mm; explicit service tolerance not yet entered.,https://en.wikipedia.org/wiki/Focal-plane_shutter
+Minolta SR-T 101,36,1/60,13.75,factory,,13.5,14.0,,Service manual instructs adjusting curtain time to 13.5–14 ms.,https://manualzz.com/doc/856993/minolta-sr-t-101-instructions
+Minolta SR-T 102 / SR-T 303,36,1/60,13.75,family,,13.5,14.0,,SR-T family value based on SR-T 101 service manual.,https://manualzz.com/doc/856993/minolta-sr-t-101-instructions
+Minolta SR-T 201,36,1/60,13.75,family,,13.5,14.0,,SR-T family value based on SR-T 101 service manual.,https://manualzz.com/doc/856993/minolta-sr-t-101-instructions
+Minolta X-300 / X-370,32,1/60,11.0,factory,,10.7,11.3,,Factory service documentation: adjust both 1st and 2nd curtain travel to 11.0 ±0.3 ms over 32 mm at 1/1000; inspection also requires each curtain within 13 ms.,https://fliphtml5.com/nbhs/bvdi/Minolta_X300_X370_-_Service_manual/
+Minolta X-500 / X-570,32,1/60,11.0,factory,,10.7,11.3,,Factory service documentation: adjust both 1st and 2nd curtain travel to 11.0 ±0.3 ms over 32 mm at 1/1000; inspection also requires each curtain within 13 ms.,https://fliphtml5.com/nbhs/bvdi/Minolta_X300_X370_-_Service_manual/
+Minolta X-700,32,1/60,11.0,factory,,10.7,11.3,,Service manual adjustment target 11 ±0.3 ms; inspection standard also requires both curtains within 13 ms over 32 mm.,https://manualzz.com/doc/53747049/minolta-x-700-service-manual
+Minolta XD / XD-7 / XD-11,21,1/100,6.25,factory,,6.0,6.5,,"Service manual: both curtains 6.0–6.5 ms over 21 mm, without difference between them.",https://fliphtml5.com/nbhs/mdcl/Minolta_XD-XD7-XD11_-_Service_manual/
+Minolta XE-1 / XE-7,22,1/90,6.0,estimate,,,,,SPT trade reference: XE-7/XE/XE-1 curtain travel 6.0 ms over 22 mm. Secondary calibration reference; no explicit tolerance listed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Minolta XG-2 / XG-7 / XG-E,32,1/60,11.0,factory,,10.7,11.3,,Service adjustment range 10.7–11.3 ms; inspection standard 11.0 ±0.2 ms and ≤13 ms allowable. Reference distance 32 mm for the Minolta service tester family.,https://manualzz.com/doc/61234641/minolta-xg-e-guide
+Minolta XG-M,32,1/60,11.0,family,,10.7,11.3,,XG-series horizontal shutter; service/test material uses about 11 ms over 32 mm (≈12.4 ms over 36 mm).,https://www.photrio.com/forum/threads/minolta-xg-m-adjusting-the-shutter.208092/
+Nikkorex F,24,1/125,7.0,estimate,,,,,Copal Square vertical shutter.,
+Nikkormat EL,24,1/125,6.0,family,,,,,SPT trade reference lists Nikkormat curtain travel as 6.0 ms edge-to-edge; represented here as the 24 mm frame height for the vertical-travel shutter. No explicit tolerance given.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikkormat ELW,24,1/125,6.0,family,,,,,SPT trade reference lists Nikkormat curtain travel as 6.0 ms edge-to-edge; represented here as the 24 mm frame height for the vertical-travel shutter. No explicit tolerance given.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikkormat FS,24,1/125,6.0,family,,,,,SPT trade reference lists Nikkormat curtain travel as 6.0 ms edge-to-edge; represented here as the 24 mm frame height for the vertical-travel shutter. No explicit tolerance given.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikkormat FT,24,1/125,6.0,family,,,,,SPT trade reference lists Nikkormat curtain travel as 6.0 ms edge-to-edge; represented here as the 24 mm frame height for the vertical-travel shutter. No explicit tolerance given.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikkormat FT2,24,1/125,6.0,family,,,,,SPT trade reference lists Nikkormat curtain travel as 6.0 ms edge-to-edge; represented here as the 24 mm frame height for the vertical-travel shutter. No explicit tolerance given.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikkormat FT3,24,1/125,6.0,family,,,,,SPT trade reference lists Nikkormat curtain travel as 6.0 ms edge-to-edge; represented here as the 24 mm frame height for the vertical-travel shutter. No explicit tolerance given.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikkormat FTn,24,1/125,6.0,family,,,,,SPT trade reference lists Nikkormat curtain travel as 6.0 ms edge-to-edge; represented here as the 24 mm frame height for the vertical-travel shutter. No explicit tolerance given.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon EL2,24,1/125,7.0,family,,,,,Vertical Copal-type shutter; family starting point.,
+Nikon EM,20,1/90,6.0,estimate,,,,,SPT trade reference: 6.0 ms over 20 mm. Secondary calibration reference; no explicit factory tolerance confirmed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon F,36,1/60,14.5,factory,,,,,Nikon repair manual: adjust shutter curtain running speed to 14.5 ms; explicit travel tolerance not stated in the located text.,https://www.scribd.com/document/781457618/Nikon-f-Service-Manual
+Nikon F-301 / N2000,20,1/125,5.6,estimate,,,,,SPT trade reference: 5.6 ms over 20 mm for N2000/F-301 family. Secondary calibration reference; no explicit factory tolerance confirmed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon F-401 / N4004,24,1/100,6.75,estimate,,,,,SPT trade reference gives 6.5–7.0 ms over 24 mm (or 5.4–5.8 ms over 20 mm); 6.75 ms midpoint used as nominal target. Not a confirmed factory tolerance.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon F-401s / N4004s,24,1/100,8.5,estimate,,,,,,
+Nikon F-401x / N5005,24,1/125,7.0,estimate,,,,,,
+Nikon F-501 / N2020,20,1/125,5.6,estimate,,,,,SPT trade reference: 5.6 ms over 20 mm for N2020/F-501 family. Secondary calibration reference; no explicit factory tolerance confirmed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon F-601 / N6006,24,1/125,7.0,estimate,,,,,,
+Nikon F-601M / N6000,24,1/125,7.0,estimate,,,,,,
+Nikon F-801 / N8008,24,1/250,2.7,factory,,,,,"Repair manual specifies shutter curtain traveling speed 2.7 ms over 24 mm. No explicit curtain-travel tolerance was located, so Auto retains generic ±5%.",https://www.scribd.com/document/444527044/Nikon-F801-Repair-Manual-pdf
+Nikon F-801s / N8008s,24,1/250,2.7,family,,,,,F-801 shutter-family value; F-801 repair manual specifies 2.7 ms over 24 mm.,https://www.scribd.com/document/444527044/Nikon-F801-Repair-Manual-pdf
+Nikon F100,21,1/250,2.58,factory,,2.50,2.66,,Repair manual: front and rear curtain speed over 21 mm must be 2.58 ±0.08 ms.,https://repaircameras.org/files/nikon/nikon-f100-repair-manual.pdf
+Nikon F2,36,1/80,10.0,factory,2.3,,,,Nikon service adjustment is approximately ±2.3% around the curtain-travel target.,https://fliphtml5.com/nbhs/didj/NIKON_F2_-_Repair_manual/
+Nikon F2 Photomic,36,1/80,10.0,family,2.3,,,,F2 shutter family; service travel tolerance inherited from F2 procedure.,
+Nikon F2A,36,1/80,10.0,family,2.3,,,,F2 shutter family; service travel tolerance inherited from F2 procedure.,
+Nikon F2AS,36,1/80,10.0,family,2.3,,,,F2 shutter family; service travel tolerance inherited from F2 procedure.,
+Nikon F2S,36,1/80,10.0,family,2.3,,,,F2 shutter family; service travel tolerance inherited from F2 procedure.,
+Nikon F2SB,36,1/80,10.0,family,2.3,,,,F2 shutter family; service travel tolerance inherited from F2 procedure.,
+Nikon F3,36,1/80,10.0,factory,5.0,,,,F3 repair manual: 10.0 ±0.5 ms across aperture (±5%).,https://fliphtml5.com/nbhs/xlsb/NIKON_F3_-_Repair_manual/
+Nikon F3/T,36,1/80,10.0,family,5.0,,,,F3 shutter family; ±5% service travel tolerance.,
+Nikon F3AF,36,1/80,10.0,family,5.0,,,,F3 shutter family; ±5% service travel tolerance.,
+Nikon F3HP,36,1/80,10.0,family,5.0,,,,F3 shutter family; ±5% service travel tolerance.,
+Nikon F3P,36,1/80,10.0,family,5.0,,,,F3 shutter family; ±5% service travel tolerance.,
+Nikon F4,24,1/250,2.9,factory,,,,,"F4 repair manual specifies 2.9 ms over 24 mm. No explicit curtain-travel tolerance was located in the available repair text, so Auto retains generic ±5%.",https://www.scribd.com/document/1053362992/Nikon-F4-Repair-Manual
+Nikon F4E,24,1/250,2.9,family,,,,,,
+Nikon F4s,24,1/250,2.9,family,,,,,,
+Nikon F5,21,1/250,2.43,factory,,2.35,2.51,,Factory repair inspection standard: shutter curtain speed 2.43 ±0.08 ms over 21 mm at 1/8000.,https://manualzz.com/doc/65048228/nikon-f5-instructions
+Nikon F50 / N50,24,1/125,7.0,estimate,,,,,,
+Nikon F55 / N55,24,1/90,9.0,estimate,,,,,,
+Nikon F6,24,1/250,2.8,estimate,,,,,Fast vertical shutter; 1/250 X-sync.,
+Nikon F60 / N60,24,1/125,7.0,estimate,,,,,,
+Nikon F65 / N65,24,1/90,9.0,estimate,,,,,,
+Nikon F70 / N70,24,1/125,7.0,estimate,,,,,,
+Nikon F75 / N75,24,1/90,9.0,estimate,,,,,,
+Nikon F80 / N80,21,1/125,5.25,factory,,5.0,5.5,,"Repair manual inspection criteria R1: curtain travel 5.25 +/-0.25 ms over the EF-8000 tester's 21 mm spacing. Reference distance is 21 mm, not full-gate travel.",https://www.scribd.com/document/1047121120/Nikon-f80-f80d-f80s-n80-n80qd-Repair
+Nikon F90 / N90,24,1/250,3.0,estimate,,,,,,
+Nikon F90X / N90s,24,1/250,3.0,estimate,,,,,,
+Nikon FA,24,1/250,3.0,family,,,,,"SPT trade reference: 2.5 ms over 20 mm, alternatively 3.0 ms over 24 mm. 24 mm value used here; no explicit factory tolerance confirmed.",https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon FE,20,1/125,5.3,family,,,,,"SPT trade reference gives 5.0–5.6 ms over 20 mm; 5.3 ms midpoint used as the nominal target. This is a reference range, not a confirmed factory tolerance.",https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon FE10,24,1/90,9.0,estimate,,,,,Cosina-built electronic vertical metal shutter; dedicated-flash X-sync is 1/90.,
+Nikon FE2,24,1/250,3.3,factory,,,,,"Nikon technical information places the FE2 high-speed shutter at approximately 3.3 ms. Service documentation was checked, but no explicit curtain-travel tolerance was located; Auto therefore uses generic ±5%.",https://phsc.ca/repair/Nikon/nikon_camera_fm2.pdf
+Nikon FG,20,1/90,5.8,estimate,,,,,SPT trade reference: 5.8 ms over 20 mm. Secondary calibration reference; no explicit factory tolerance confirmed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Nikon FG-20,24,1/90,9.0,estimate,,,,,,
+Nikon FM,24,1/125,7.0,family,,,7.0,,Nikon FM service manual: each curtain within 7 ms at 1/125 sec.; one-sided service limit.,https://manualzz.com/doc/66788240/nikon-fm-service-manual
+Nikon FM10,24,1/125,7.0,estimate,,,,,Cosina-built vertical metal shutter; manual specifies 1/125 X-sync.,
+"Nikon FM2 (original, 1982–1984)",24,1/200,3.6,factory,,,,,"Original FM2: 1/200 X-sync and approximately 3.6 ms curtain travel. Factory repair documentation was checked, but no explicit curtain-travel tolerance was located; Auto therefore uses the generic ±5% fallback.",https://phsc.ca/repair/Nikon/nikon_camera_fm2.pdf
+Nikon FM2/T,24,1/250,3.3,family,,,,,FM2N-derived titanium-body variant.,https://phsc.ca/repair/Nikon/nikon_camera_fm2.pdf
+Nikon FM2N / New FM2,24,1/250,3.3,family,,,,,"1984-on New FM2/FM2N: 1/250 X-sync and approximately 3.3 ms travel. Factory repair documentation was checked, but no explicit curtain-travel tolerance was located; Auto therefore uses generic ±5%.",https://phsc.ca/repair/Nikon/nikon_camera_fm2.pdf
+Nikon FM3A,24,1/250,3.3,family,,,,,"1/4000 vertical metal shutter, 1/250 X-sync.",https://phsc.ca/repair/Nikon/nikon_camera_fm2.pdf
+Nikon I,32,pre-X / varies,18.0,family,,,,,Early horizontal cloth shutter family.,
+Nikon M,34,pre-X / varies,18.0,family,,,,,Early horizontal cloth shutter family.,
+Nikon Pronea 600i / 6i,16.7,1/125,5.0,estimate,,,,,APS-H image height is smaller than 35 mm; verify sensor spacing.,
+Nikon Pronea S,16.7,1/125,5.0,estimate,,,,,APS-H image height is smaller than 35 mm; verify sensor spacing.,
+Nikon S,34,~1/30,18.0,family,,,,,Early horizontal cloth shutter family.,
+Nikon S2,36,~1/50,18.0,family,,,,,Mechanically close to earlier I/M/S family.,
+Nikon S3,36,1/60,14.5,factory,,,,,SP/S3/S4/S3M generation; Nikon documents ~14.5 ms.,
+Nikon S3M,36,1/60,14.5,factory,,,,,SP/S3/S4/S3M generation; Nikon documents ~14.5 ms.,
+Nikon S4,36,1/60,14.5,factory,,,,,SP/S3/S4/S3M generation; Nikon documents ~14.5 ms.,
+Nikon SP,36,1/60,14.5,factory,,,,,Nikon documents ~14.5 ms across the frame.,
+NIKONOS I,24,verify,7.0,estimate,,,,,Vertical metal focal-plane shutter; 1/30–1/500. X-sync value should be verified for the flash system used.,
+NIKONOS II,24,verify,7.0,estimate,,,,,Vertical metal focal-plane shutter; 1/30–1/500. X-sync value should be verified for the flash system used.,
+NIKONOS III,24,verify,7.0,estimate,,,,,Vertical metal focal-plane shutter; family estimate.,
+NIKONOS IV-A,24,1/90,9.0,estimate,,,,,Nikon specifies vertical metal focal-plane shutter and 1/90 X-sync.,
+NIKONOS RS AF,24,1/125,7.0,estimate,,,,,Nikon specifies vertical focal-plane shutter and 1/125 X-sync.,
+NIKONOS V,24,1/90,9.0,estimate,,,,,Nikon specifies vertical metal focal-plane shutter and 1/90 X-sync.,
+Olympus OM-1,32,1/60,11.9,factory,,11.7,12.1,,Repair manual: both curtains 11.7–12.1 ms at 1/1000; service literature commonly uses a 32 mm travel mask.,https://manualzz.com/doc/4137603/olympus-om-1-cameras-repair-manual
+Olympus OM-10,32,1/60,12.0,factory,,11.9,12.1,,Service manual adjustment: 1st and 2nd curtain speeds 12.0 ±0.1 ms.,https://www.scribd.com/document/494270218/olympus-OM-10-service
+Olympus OM-1N,32,1/60,11.9,family,,11.7,12.1,,OM-1 shutter-family service value.,https://manualzz.com/doc/4137603/olympus-om-1-cameras-repair-manual
+Olympus OM-2,32,1/60,11.5,factory,,11.4,11.6,0.15,"Service manual: both curtains 11.5 ±0.1 ms; curtain difference ≤0.15 ms, opening curtain faster.",https://manualzz.com/doc/6346585/olympus-om-2-camera-service-manual
+Olympus OM-20 / OM-G,32,1/60,11.5,family,,,,,SPT trade reference: OM-G/OM-20 curtain travel 11.5 ms over 32 mm. Secondary calibration reference; no explicit tolerance listed.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Olympus OM-2N,32,1/60,11.5,family,,11.4,11.6,0.15,OM-2N repair standard repeats 11.5 ±0.1 ms and ≤0.15 ms curtain difference.,https://www.scribd.com/document/963353633/Olympus-OM-2n-Repair-Manual
+Olympus OM-3,32,1/60,11.5,estimate,,,,,High-end OM horizontal shutter; dedicated service travel value not yet entered.,
+Olympus OM-30 / OM-F,32,1/60,12.0,family,,,,,OM horizontal shutter family; dedicated factory travel tolerance not yet entered.,
+Olympus OM-3Ti,32,1/60,11.5,estimate,,,,,High-end OM horizontal shutter; dedicated service travel value not yet entered.,
+Olympus OM-4,32,1/60,,unknown,,,,,"Service manual reports curtain speed 10.9 ms (+0.1/-0.15 ms) and max 0.06 ms difference between curtains, but the reference measurement distance was not explicit in the located service text; values are therefore not auto-applied.",https://www.scribd.com/document/517300309/Olympus-OM-4-Service-Manual
+Olympus OM-40 / OM-PC,32,1/60,12.0,family,,,,,OM horizontal shutter family; dedicated factory travel tolerance not yet entered.,
+Olympus OM-4Ti,32,1/60,,unknown,,,,,"Service manual reports curtain speed 10.9 ms (+0.1/-0.15 ms) and max 0.06 ms difference between curtains, but the reference measurement distance was not explicit in the located service text; values are therefore not auto-applied.",https://www.scribd.com/document/517300309/Olympus-OM-4-Service-Manual
+Pentax ES,36,1/60,14.0,family,,,,,"Electronic Spotmatic-era horizontal shutter; Spotmatic value is a starting point, not a dedicated service tolerance.",
+Pentax ES II,36,1/60,14.0,family,,,,,"Electronic Spotmatic-era horizontal shutter; Spotmatic value is a starting point, not a dedicated service tolerance.",
+Pentax K1000,32,1/60,12.5,family,,,,,"K1000 repair literature uses the Spotmatic shutter procedure: 12.5 ms over 32 mm (13.3 ms/34 mm, 14 ms edge-to-edge). It specifies side-to-side exposure matching within 5%, not a curtain-travel-time tolerance, so travel Auto remains generic ±5%.",https://studylib.net/doc/27496298/k1000-rsm-eng-text
+Pentax K2,24,1/125,7.0,estimate,,,,,Vertical metal shutter; dedicated service travel value not yet entered.,
+Pentax KM,36,1/60,14.0,family,,,,,Mechanical K-series derived from Spotmatic architecture; use as starting point pending dedicated service value.,
+Pentax KX,36,1/60,14.0,family,,,,,Mechanical K-series derived from Spotmatic architecture; use as starting point pending dedicated service value.,
+Pentax LX,36,1/75,,unknown,,,,,"Service manual gives 10.2 ms for each curtain at 1/1000, with the 2nd equal or slightly slower; reference measurement distance was not stated in the located text, so no automatic travel target is applied.",https://manualzz.com/doc/3013811/asahi-pentax-il-x-service-manual
+Pentax ME,20,1/100,6.0,factory,,,,,Service manual adjustment value: blade travel 6 ms over 20 mm; no explicit symmetric tolerance located.,https://www.pentax-manuals.com/manuals/service/me_service_sm.pdf
+Pentax ME F,21,1/125,6.5,family,,,6.5,,ME Super-family vertical shutter starting point; one-sided ≤6.5 ms service limit used as family value.,https://manualshelf.com/manual/asahi-pentax/me-super/service-manual-english/page-9.html
+Pentax ME Super,21,1/125,6.5,factory,,,6.5,,Service manual check: curtain speed 6.5 ms or faster over 21 mm at 1/1000; one-sided service limit.,https://manualshelf.com/manual/asahi-pentax/me-super/service-manual-english/page-9.html
+Pentax MX,32,1/60,12.25,factory,,12.2,12.3,,"Service manual: curtain speed 12.2–12.3 ms, adjusted the same way as the Spotmatic; 32 mm service-tester distance.",https://manualzilla.com/doc/7076355/asahi-pentax-mx-service-manual
+Pentax P30 / P3,21,1/100,6.05,estimate,,5.75,6.35,,SPT professional-repair reference for P3/P30/P5/P50: 6.05 ±0.3 ms over 21 mm (alternatively 5.76 ms over 20 mm). Tolerance is SPT/trade data.,https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Pentax P50 / P5,24,1/100,7.0,estimate,,,,,Vertical metal shutter; dedicated service travel value not yet entered.,
+Pentax Program A / Program Plus,24,1/100,7.2,family,,,,,"SPT trade reference: 6.0 ms over 20 mm, alternatively 7.2 ms over 24 mm. Secondary calibration reference; no explicit tolerance listed.",https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Pentax S,36,~1/30,16.5,family,,,,,Early Asahi Pentax horizontal cloth shutter; S3 service value used as family starting point.,
+Pentax S1,36,~1/30,16.5,factory,,16.2,16.8,,Pentax S3 factory service manual explicitly applies to this model family; curtain travel over the 36 mm picture format is 16.5 ±0.3 ms at about 20°C.,https://manualzz.com/doc/61656177/asahi-pentax-s3-service-manual
+Pentax S1a,36,~1/30,16.5,factory,,16.2,16.8,,Pentax S3 factory service manual explicitly applies to this model family; curtain travel over the 36 mm picture format is 16.5 ±0.3 ms at about 20°C.,https://manualzz.com/doc/61656177/asahi-pentax-s3-service-manual
+Pentax S2,36,~1/30,16.5,factory,,16.2,16.8,,Pentax S3 factory service manual explicitly applies to this model family; curtain travel over the 36 mm picture format is 16.5 ±0.3 ms at about 20°C.,https://manualzz.com/doc/61656177/asahi-pentax-s3-service-manual
+Pentax S3,36,~1/30,16.5,factory,,16.2,16.8,,Pentax S3 factory service manual explicitly applies to this model family; curtain travel over the 36 mm picture format is 16.5 ±0.3 ms at about 20°C.,https://manualzz.com/doc/61656177/asahi-pentax-s3-service-manual
+Pentax SFX / SF1,24,1/100,7.0,estimate,,,,,AF-era vertical shutter; dedicated service travel value not yet entered.,
+Pentax SP1000,36,1/60,14.0,family,,13.7,14.3,0.1,Spotmatic-family shutter service values.,https://manualzilla.com/doc/7076289/asahi-pentax-spotmatic-repair-manual
+Pentax SP500,36,1/60,14.0,family,,13.7,14.3,0.1,Spotmatic-family shutter service values.,https://manualzilla.com/doc/7076289/asahi-pentax-spotmatic-repair-manual
+Pentax Spotmatic,36,1/60,14.0,factory,,13.7,14.3,0.1,Service manual: 14.0 ±0.3 ms over 36 mm (or 12.5 ±0.3 ms over 32 mm); 1st curtain 0.05–0.1 ms faster than 2nd.,https://manualzilla.com/doc/7076289/asahi-pentax-spotmatic-repair-manual
+Pentax Spotmatic F,36,1/60,14.0,family,,13.7,14.3,0.1,Spotmatic-family shutter service values.,https://manualzilla.com/doc/7076289/asahi-pentax-spotmatic-repair-manual
+Pentax Spotmatic II,36,1/60,14.0,family,,13.7,14.3,0.1,Spotmatic shutter-family service values.,https://manualzilla.com/doc/7076289/asahi-pentax-spotmatic-repair-manual
+Pentax Super A / Super Program,24,1/125,6.8,family,,,,,"SPT trade reference for the 1/125 X-sync version: 5.6 ms over 20 mm, alternatively 6.8 ms over 24 mm. Later 1/250-X version is faster (6.0 ms/24 mm).",https://github.com/srozum/film_camera_tester/wiki/Curtains-Travel-Times
+Pentax SV,36,1/30,16.5,factory,,16.2,16.8,,Pentax S3 factory service manual explicitly applies to this model family; curtain travel over the 36 mm picture format is 16.5 ±0.3 ms at about 20°C.,https://manualzz.com/doc/61656177/asahi-pentax-s3-service-manual
