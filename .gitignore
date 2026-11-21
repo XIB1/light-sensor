@@ -1,2 +1,4 @@
 __pycache__/
 debug_captures/
+shutter_summary.json
+.shutter_summary.json.*.tmp

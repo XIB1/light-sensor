@@ -15,10 +15,11 @@ Key features
   intentionally kept separate (1/200 vs 1/250 X-sync).
 * Separate optical aperture width and measured sensor center-to-center spacing.
 * Independent exposure measurement at both sensors plus 1st/2nd curtain travel.
+* Reference-based integrated-light exposure, with first-order AC reconstruction checks.
 * Automatic camera-specific curtain-travel tolerance where service data is known; ±5% fallback.
 * Separate curtain-to-curtain speed-mismatch assessment, with service-manual limits when available.
 * Selected shutter speed is a search hint, not a forced result.
-* Summary of the latest 1–20 completed tests per speed, retained per source.
+* One saved summary sheet of the latest 1–20 completed tests per speed.
 * ±3-stop analysis window for initial tensioning / badly misadjusted shutters.
 
 Dependencies
@@ -70,6 +71,9 @@ DEFAULT_AC_HZ = 35.0
 SENSOR_TAU_US = 7.0
 NOISE_RMS = 0.003
 SEARCH_STOPS = 3.0
+LIVE_EARLY_CLOSE_MIN_S = 1 / 30
+DEFAULT_AC_METHOD = "AC transient edges"
+INTEGRATION_METHOD = "Light integration (reference)"
 
 COMMON_SPEEDS = [
     "1", "1/2", "1/4", "1/8", "1/15", "1/30", "1/60", "1/80",
@@ -368,6 +372,58 @@ def format_summary_measurement(seconds, nominal_s):
     return f"{seconds * 1000:.3f} ({stops:+.2f} stops)"
 
 
+def passing_test_window(verdicts, count):
+    """A speed is complete only when every test in a full recent window passed."""
+    window = list(verdicts)[-count:]
+    return len(window) == count and all(window)
+
+
+def load_summary_history(path):
+    """Load the current sheet without silently discarding an unreadable file."""
+    try:
+        saved = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, {}, 5
+    if not isinstance(saved, dict) or saved.get("version") != 1:
+        raise ValueError("Unsupported summary file format")
+    count = saved.get("count")
+    speeds = saved.get("speeds")
+    if type(count) is not int or not 1 <= count <= 20 or not isinstance(speeds, dict):
+        raise ValueError("Invalid saved summary settings")
+    history, verdicts = {}, {}
+    for speed, records in speeds.items():
+        nominal = float(speed)
+        if not math.isfinite(nominal) or nominal <= 0 or not isinstance(records, dict):
+            raise ValueError("Invalid saved shutter speed")
+        exposures, passed = records.get("exposures_s"), records.get("passed")
+        if (not isinstance(exposures, list) or not isinstance(passed, list)
+                or len(exposures) != len(passed)
+                or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                       for value in exposures)
+                or any(type(value) is not bool for value in passed)):
+            raise ValueError("Invalid saved summary measurements")
+        history[nominal] = deque(exposures, maxlen=20)
+        verdicts[nominal] = deque(passed, maxlen=20)
+    return history, verdicts, count
+
+
+def save_summary_history(path, history, verdicts, count):
+    """Replace the saved sheet only after its complete contents have been written."""
+    path = Path(path)
+    saved = {
+        "version": 1,
+        "count": count,
+        "speeds": {str(speed): {"exposures_s": list(values), "passed": list(verdicts[speed])}
+                   for speed, values in history.items()},
+    }
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(saved, indent=2, allow_nan=False), encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def curtain_speed_m_s(travel_s, path_mm):
     if travel_s <= 0:
         return float("nan")
@@ -457,6 +513,32 @@ class AnalysisResult:
     sensor_mismatch_percent: float
     confidence: float
     event_indices: dict
+    fitted_ac_cutoff_hz: tuple[float, float] | None = None
+    integration_diagnostics: dict | None = None
+
+
+@dataclass(frozen=True)
+class IntegrationChannelReference:
+    full_level: float
+    polarity: int
+    ac_cutoff_hz: float
+    plateau_relative_rms: float
+    noise_rms: float
+
+
+@dataclass(frozen=True)
+class IntegrationReference:
+    reference_id: str
+    captured_at_utc: str
+    sample_rate_hz: int
+    coupling: str
+    channels: tuple[IntegrationChannelReference, IntegrationChannelReference]
+
+    @classmethod
+    def from_dict(cls, values):
+        return cls(values["reference_id"], values["captured_at_utc"],
+                   values["sample_rate_hz"], values["coupling"],
+                   tuple(IntegrationChannelReference(**channel) for channel in values["channels"]))
 
 
 def infer_sensor_channels(event_indices):
@@ -483,7 +565,8 @@ def write_debug_capture(directory, raw_samples, samples, settings, result=None,
     report = {
         "schema_version": 1,
         "captured_at_utc": captured_at.isoformat(),
-        "outcome": "completed" if result is not None and error is None else "rejected",
+        "outcome": ("reference" if settings.get("capture_purpose") == "full-open reference" and error is None
+                    else "completed" if result is not None and error is None else "rejected"),
         "settings": settings,
         "analysis_start_frame": analysis_start_frame,
         "raw_sample_count": len(raw_samples),
@@ -543,7 +626,8 @@ def write_debug_capture(directory, raw_samples, samples, settings, result=None,
     return archive
 
 
-def _edge_measure_ac(channel, fs, nominal_s):
+def _edge_measure_ac(channel, fs, nominal_s, *, confirm_close=False):
+    """Measure the centers of the two transitions, not extrema on their tails."""
     x = smooth(channel, 5)
     n0 = min(len(x), max(64, int(0.008 * fs)))
     sigma = robust_sigma(x[:n0])
@@ -561,32 +645,69 @@ def _edge_measure_ac(channel, fs, nominal_s):
         raise ValueError("No clear opening transient")
     first = start + int(hits[0])
     opening_sign = 1.0 if x[first] >= 0 else -1.0
-    opposite = np.flatnonzero(x[first:open_end] * opening_sign <= -threshold)
-    lobe_end = first + int(opposite[0]) if len(opposite) else open_end
-    open_idx = first + int(np.argmax(x[first:lobe_end] * opening_sign))
+    rate = np.gradient(x)
+    rate_noise = robust_sigma(rate[:n0])
+    opening_start = max(start, first - int(0.001 * fs))
+    opening_end = min(open_end, first + max(8, int(min(0.003, nominal_s / 4) * fs)))
+    open_peak = opening_start + int(np.argmax(rate[opening_start:opening_end] * opening_sign))
 
     low = max(4 / fs, nominal_s / (2.0 ** SEARCH_STOPS))
     high = nominal_s * (2.0 ** SEARCH_STOPS)
-    close_start = max(open_idx + 2, open_idx + int(low * fs))
-    close_end = min(len(x), open_idx + int(high * fs) + int(0.060 * fs))
+    close_start = max(open_peak + 2, open_peak + int(low * fs))
+    close_end = min(len(x), open_peak + int(high * fs) + int(0.060 * fs))
+    if confirm_close:
+        # Ignore the artificial step from the smoother's padding at the buffer end.
+        close_end = min(close_end, len(x) - max(4, int(0.0001 * fs)))
     if close_end <= close_start + 4:
         raise ValueError("Closing edge not yet in live buffer")
 
-    close_section = x[close_start:close_end]
-    # AC opening and closing transients are normally opposite polarity.
-    if opening_sign > 0:
-        close_idx = int(np.argmin(close_section)) + close_start
-    else:
-        close_idx = int(np.argmax(close_section)) + close_start
+    close_peak = close_start + int(np.argmax(-opening_sign * rate[close_start:close_end]))
+
+    def midpoint(peak, direction):
+        strength = direction * rate[peak]
+        if strength <= 8 * rate_noise:
+            raise ValueError("No clear shutter transition")
+        left = right = peak
+        cutoff = max(strength * 0.10, 3 * rate_noise)
+        while left > start and direction * rate[left - 1] > cutoff:
+            left -= 1
+        while right + 1 < len(x) and direction * rate[right + 1] > cutoff:
+            right += 1
+        pad = max(3, int(0.0001 * fs))
+        before = float(np.median(x[max(0, left - pad):left]))
+        after = float(np.median(x[right + 1:min(len(x), right + pad + 1)]))
+        if direction * (after - before) <= max(6 * sigma, 1e-4):
+            raise ValueError("Shutter transition is too small to measure")
+        target = (before + after) / 2
+        region = x[max(0, left - pad):min(len(x), right + pad + 1)]
+        crossings = np.flatnonzero((direction * (region[:-1] - target) <= 0)
+                                  & (direction * (region[1:] - target) >= 0))
+        if not len(crossings):
+            raise ValueError("Could not locate shutter transition midpoint")
+        indices = crossings + max(0, left - pad)
+        index = int(indices[np.argmin(np.abs(indices - peak))])
+        fraction = (target - x[index]) / (x[index + 1] - x[index])
+        return int(round(index + float(fraction))), abs(after - before)
+
+    open_idx, open_height = midpoint(open_peak, opening_sign)
+    close_idx, close_height = midpoint(close_peak, -opening_sign)
+    if confirm_close:
+        # An AC opening pulse drifts back toward baseline while the shutter
+        # is still open. Require a distinct, sharp transition in the other direction.
+        if (close_height < 0.12 * open_height
+                or abs(rate[close_peak]) < 0.12 * abs(rate[open_peak])):
+            raise ValueError("No distinct closing transient yet")
+    if close_idx <= open_idx:
+        raise ValueError("Closing transition must follow opening")
 
     measured = (close_idx - open_idx) / fs
-    snr = min(abs(x[open_idx]), abs(x[close_idx])) / sigma
+    snr = min(open_height, close_height) / sigma
     conf = float(np.clip((snr - 3.0) / 15.0, 0.0, 1.0))
     return measured, open_idx, close_idx, conf
 
 
 
-def _make_ac_template(exposure_s, fs, expected_travel_ms, path_mm, aperture_mm):
+def _make_ac_template(exposure_s, fs, expected_travel_ms, path_mm, aperture_mm, ac_hz=None):
     """Build one finite-aperture AC-coupled sensor pulse for fast-shutter fitting."""
     expected_s = expected_travel_ms / 1000.0
     if expected_s <= 0 or path_mm <= 0 or aperture_mm <= 0:
@@ -608,7 +729,7 @@ def _make_ac_template(exposure_s, fs, expected_travel_ms, path_mm, aperture_mm):
         samples=100,
     )
     y = one_pole_lowpass(light, fs, SENSOR_TAU_US * 1e-6)
-    y = one_pole_highpass(y, fs, DEFAULT_AC_HZ)
+    y = one_pole_highpass(y, fs, DEFAULT_AC_HZ if ac_hz is None else ac_hz)
     y -= np.mean(y)
     return y, int(round(pre_s * fs))
 
@@ -624,7 +745,13 @@ def _best_normalized_match(signal, template, allow_inverted=False):
     if tnorm <= 1e-12:
         return -1.0, 0
     t /= tnorm
-    corr = np.correlate(x, t, mode="valid")
+    if len(x) * len(t) > 2_000_000:
+        fft_size = 1 << (len(x) + len(t) - 2).bit_length()
+        convolution = np.fft.irfft(np.fft.rfft(x, fft_size)
+                                  * np.fft.rfft(t[::-1], fft_size), fft_size)
+        corr = convolution[len(t) - 1:len(x)]
+    else:
+        corr = np.correlate(x, t, mode="valid")
     n = len(t)
     cs = np.concatenate(([0.0], np.cumsum(x)))
     cs2 = np.concatenate(([0.0], np.cumsum(x*x)))
@@ -639,7 +766,30 @@ def _best_normalized_match(signal, template, allow_inverted=False):
     return float(score[best]), best
 
 
-def _template_measure_ac(channel, fs, nominal_s, expected_travel_ms, path_mm, aperture_mm):
+def _estimate_ac_cutoff(channel, fs, nominal_s, crossing_s):
+    """Estimate decay on a resolved illuminated plateau; short pulses use the default."""
+    if ac_pulses_overlap(nominal_s, crossing_s, fs):
+        return DEFAULT_AC_HZ
+    try:
+        duration, opened, closed, _ = _edge_measure_ac(channel, fs, nominal_s)
+    except ValueError:
+        return DEFAULT_AC_HZ
+    margin = int(max(2 * crossing_s, 0.0005) * fs)
+    lo, hi = opened + margin, closed - margin
+    if duration <= 4 * crossing_s or hi - lo < int(0.001 * fs):
+        return DEFAULT_AC_HZ
+    baseline = float(np.median(channel[:max(8, int(0.008 * fs))]))
+    values = np.abs(np.asarray(channel[lo:hi], dtype=float) - baseline)
+    noise = robust_sigma(channel[:max(8, int(0.008 * fs))])
+    valid = values > max(8 * noise, 1e-5)
+    if np.count_nonzero(valid) < 32:
+        return DEFAULT_AC_HZ
+    times = np.arange(len(values))[valid] / fs
+    slope = float(np.polyfit(times, np.log(values[valid]), 1)[0])
+    return float(np.clip(-slope / (2 * math.pi), 0, 500))
+
+
+def _template_measure_ac(channel, fs, nominal_s, expected_travel_ms, path_mm, aperture_mm, ac_hz=None):
     """
     Fit the complete AC pulse when opening/closing transients overlap.
 
@@ -653,13 +803,16 @@ def _template_measure_ac(channel, fs, nominal_s, expected_travel_ms, path_mm, ap
     n0 = min(len(x), max(64, int(0.008 * fs)))
     baseline = float(np.median(x[:n0]))
     centered = x - baseline
-    strongest = int(np.argmax(np.abs(centered)))
+    hits = np.flatnonzero(np.abs(centered) >= max(8 * robust_sigma(x[:n0]), 0.008))
+    if not len(hits):
+        raise ValueError("No clear shutter pulse")
+    onset = int(hits[0])
 
-    # Fast-shutter events are compact. Crop around the strongest transient so
-    # live ring buffers do not make the candidate search unnecessarily costly.
-    lo = max(0, strongest - int(0.012 * fs))
+    # Keep the opening even when the closing pulse is stronger and the
+    # exposure is longer than the old 12 ms pre-peak crop.
+    lo = max(0, onset - int(0.004 * fs))
     max_candidate_s = nominal_s * (2.0 ** SEARCH_STOPS)
-    hi = min(len(x), strongest + int((max_candidate_s + 0.025) * fs))
+    hi = min(len(x), onset + int((max_candidate_s + 0.025) * fs))
     segment = centered[lo:hi]
     if len(segment) < 128:
         segment = centered
@@ -672,8 +825,11 @@ def _template_measure_ac(channel, fs, nominal_s, expected_travel_ms, path_mm, ap
     best_open_offset = 0
 
     for exposure_s in candidates:
+        crossing_s = aperture_mm * (expected_travel_ms / 1000.0) / path_mm
+        if int(math.ceil((0.0015 + crossing_s + exposure_s + 0.010) * fs)) >= len(segment):
+            continue
         template, open_offset = _make_ac_template(
-            float(exposure_s), fs, expected_travel_ms, path_mm, aperture_mm
+            float(exposure_s), fs, expected_travel_ms, path_mm, aperture_mm, ac_hz
         )
         score, start = _best_normalized_match(segment, template, allow_inverted=True)
         if score > best_score:
@@ -723,6 +879,49 @@ def _edge_measure_dc(channel, fs, nominal_s):
     return measured, open_idx, close_idx, conf
 
 
+def _live_analysis_start(samples, peak_floor, fs=FS):
+    baseline = samples[:max(8, int(0.008 * fs))]
+    centered = samples - np.median(baseline, axis=0)
+    sigma = max(robust_sigma(baseline[:, 0]), robust_sigma(baseline[:, 1]))
+    hits = np.flatnonzero(np.any(np.abs(centered) >= max(peak_floor, 8 * sigma), axis=1))
+    if not len(hits):
+        raise ValueError("No clear shutter opening in retained audio")
+    return max(0, int(hits[0]) - int(0.012 * fs))
+
+
+def _live_closing_ready(samples, nominal_s, path, aperture, travel_ms, coupling, fs=FS):
+    """Check for a stereo close with enough recorded audio for the final analysis."""
+    travel_s = travel_ms / 1000.0
+    crossing_s = aperture * travel_s / path
+    # Include the full integration tail and the pulse fit's 10 ms tail.
+    tail = math.ceil(max(0.015, 7 * crossing_s) * fs)
+    closes = []
+    opens = []
+    for channel in samples.T:
+        if coupling.startswith("AC"):
+            _, opened, closed, _ = _edge_measure_ac(channel, fs, nominal_s, confirm_close=True)
+        else:
+            _, opened, closed, _ = _edge_measure_dc(channel, fs, nominal_s)
+            dark = channel[:int(0.008 * fs)]
+            baseline = np.median(dark)
+            lit_level = np.max(np.abs(channel - baseline))
+            # The DC detector reports the last bright sample even while the
+            # buffer ends during an exposure. Require a return to darkness.
+            if abs(np.median(channel[-tail:]) - baseline) > max(
+                6 * robust_sigma(dark), 0.10 * lit_level
+            ):
+                return False
+        if not nominal_s / 2**SEARCH_STOPS <= (closed - opened + 1) / fs <= (
+            nominal_s * 2**SEARCH_STOPS + 0.05
+        ):
+            return False
+        opens.append(opened)
+        closes.append(closed)
+    return (len(samples) - max(closes) >= tail
+            and max(abs(opens[1] - opens[0]), abs(closes[1] - closes[0])) / fs
+            <= max(0.020, 3 * travel_s))
+
+
 def ac_pulses_overlap(exposure_s, crossing_s, fs):
     """Leave a margin for finite aperture, audio filtering and sample resolution."""
     return exposure_s <= max(4.0 * crossing_s, 16.0 / fs)
@@ -738,12 +937,150 @@ def waveform_view_bounds(event_indices, sample_count, fs=FS):
     return max(0, first - padding), min(sample_count, last + padding + 1)
 
 
+def _integration_segment(channel, opened, closed, fs, crossing_s, cutoff_hz, polarity):
+    """Reconstruct local light from an initially dark, first-order AC response.
+
+    The inverse is an explicit model assumption, not an electrical calibration.
+    Retain signed baseline noise rather than clipping it into positive light.
+    """
+    pre = max(0.003, 4 * crossing_s)
+    post = max(0.003, 6 * crossing_s)
+    lo = max(0, opened - int(math.ceil(pre * fs)))
+    hi = min(len(channel), closed + int(math.ceil(post * fs)))
+    dark_end = opened - int(math.ceil(max(0.0004, 1.5 * crossing_s) * fs))
+    dark = np.asarray(channel[lo:dark_end], dtype=float)
+    tail_count = max(16, int(0.001 * fs))
+    if len(dark) < 32 or hi - closed < 2 * tail_count:
+        raise ValueError("Integration needs dark audio before and after the shutter")
+    baseline = float(np.median(dark))
+    noise = robust_sigma(dark)
+    y = polarity * (np.asarray(channel[lo:hi], dtype=float) - baseline)
+    light = y.copy()
+    if cutoff_hz > 0:
+        integral = np.concatenate(([0.0], np.cumsum((y[:-1] + y[1:]) / (2 * fs))))
+        light += 2 * math.pi * cutoff_hz * integral
+    return light, lo, hi, noise, tail_count
+
+
+def capture_integration_reference(stereo, nominal_s, expected_travel_ms, path_mm,
+                                  aperture_mm, coupling="AC coupled", fs=FS):
+    """Learn each channel's full-open level and resolved AC decay from a slow shot."""
+    if nominal_s < 1 / 60 - 1e-9:
+        raise ValueError("Select 1/60 or slower to capture a full-open reference")
+    stereo = np.asarray(stereo, dtype=float)
+    if stereo.ndim != 2 or stereo.shape[1] < 2 or not np.all(np.isfinite(stereo)):
+        raise ValueError("Reference needs finite stereo samples")
+    if path_mm <= 0 or expected_travel_ms <= 0 or aperture_mm <= 0 or fs <= 0:
+        raise ValueError("Reference geometry and sample rate must be positive")
+    crossing = aperture_mm * expected_travel_ms / (1000 * path_mm)
+    margin = int(math.ceil(max(0.001, 2 * crossing) * fs))
+    refs = []
+    for c in range(2):
+        channel = stereo[:, c]
+        if np.max(np.abs(channel)) >= 0.98:
+            raise ValueError(f"Input channel {c + 1} clips; lower the input level")
+        measure = _edge_measure_ac if coupling.startswith("AC") else _edge_measure_dc
+        duration, opened, closed, _ = measure(channel, fs, nominal_s)
+        a, b = opened + margin, closed - margin
+        if duration < max(0.008, 8 * crossing) or b - a < int(0.004 * fs):
+            raise ValueError("Reference has no resolved full-open plateau; use a slower speed")
+        baseline = float(np.median(channel[:max(64, int(0.008 * fs))]))
+        noise = robust_sigma(channel[:max(64, int(0.008 * fs))])
+        plateau = channel[a:b] - baseline
+        polarity = 1 if np.median(plateau[:max(16, int(0.002 * fs))]) >= 0 else -1
+        values = polarity * plateau
+        valid = values > max(10 * noise, 0.08 * float(np.max(values)))
+        if np.count_nonzero(valid) < max(32, int(0.001 * fs)) or np.median(values[valid]) < 30 * noise:
+            raise ValueError(f"Input channel {c + 1} reference is too weak")
+        cutoff = 0.0
+        if coupling.startswith("AC"):
+            times = np.arange(len(values))[valid] / fs
+            fit_values = values[valid]
+            slope, intercept = np.polyfit(times, np.log(fit_values), 1)
+            predicted = np.exp(intercept + slope * times)
+            residual = np.log(fit_values) - (intercept + slope * times)
+            slope_error = float(np.std(residual) / np.sqrt(np.sum((times - times.mean()) ** 2)))
+            if slope > max(3 * slope_error, 0.5):
+                raise ValueError("Reference illumination rises during exposure; keep the light steady")
+            cutoff = max(0.0, float(-slope / (2 * math.pi)))
+            if cutoff > 500:
+                raise ValueError("Reference AC response decays too quickly for integration")
+            fit_error = float(np.sqrt(np.mean((fit_values - predicted) ** 2)) / np.median(fit_values))
+            if fit_error > 0.03:
+                raise ValueError("Reference plateau does not follow a stable AC decay")
+        light, lo, hi, noise, tail = _integration_segment(
+            channel, opened, closed, fs, crossing, cutoff, polarity)
+        full_level = float(np.median(light[a - lo:b - lo]))
+        flat_error = float(np.sqrt(np.mean((light[a - lo:b - lo] - full_level) ** 2)) / full_level)
+        if not np.isfinite(full_level) or full_level <= 30 * noise or flat_error > 0.04:
+            raise ValueError("Reference light is not steady enough for integration")
+        if abs(float(np.median(light[-tail:]))) > max(0.03 * full_level, 6 * noise):
+            raise ValueError("Reference does not return to darkness after AC reconstruction")
+        refs.append(IntegrationChannelReference(full_level, polarity, cutoff, flat_error, noise))
+    return IntegrationReference(uuid4().hex, datetime.now(timezone.utc).isoformat(), fs,
+                                coupling, tuple(refs))
+
+
+def _measure_light_area(channel, opened, closed, fs, crossing_s, reference):
+    if (not np.isfinite(reference.full_level) or reference.full_level <= 0
+            or reference.polarity not in (-1, 1)
+            or not np.isfinite(reference.ac_cutoff_hz) or reference.ac_cutoff_hz < 0):
+        raise ValueError("Invalid light reference; capture a new reference")
+    if np.max(np.abs(channel)) >= 0.98:
+        raise ValueError("Input clips; lower the level and capture a new reference")
+    light, lo, hi, noise, tail = _integration_segment(
+        channel, opened, closed, fs, crossing_s, reference.ac_cutoff_hz, reference.polarity)
+    level = reference.full_level
+    filtered = smooth(light, max(3, int(round(0.00005 * fs))))
+    peak = float(np.max(filtered))
+    if peak < max(12 * noise, 0.001 * level):
+        raise ValueError("Integrated shutter pulse is too weak")
+    if np.min(filtered) < -max(0.03 * peak, 6 * noise):
+        raise ValueError("Reconstructed light is negative; check polarity and recapture the reference")
+    if peak > 1.15 * level:
+        raise ValueError("Light exceeds the full-open reference; recapture the reference")
+    duration = float(np.trapezoid(light, dx=1 / fs) / level)
+    if not np.isfinite(duration) or duration <= 0:
+        raise ValueError("Integrated light area is not positive; recapture the reference")
+    tail_level = float(np.median(light[-tail:]))
+    if abs(tail_level) > max(0.025 * level, 6 * noise):
+        raise ValueError("AC reconstruction does not return to darkness; recapture the reference")
+    outer_area = (np.trapezoid(light[:tail], dx=1 / fs)
+                  + np.trapezoid(light[-tail:], dx=1 / fs)) / level
+    if abs(outer_area) > max(0.08 * duration, 6 * noise / level * 0.002 / math.sqrt(tail)):
+        raise ValueError("Integrated area depends on the window; check the AC reference and baseline")
+    edge_duration = (closed - opened) / fs
+    if edge_duration > max(4 * crossing_s, 0.004):
+        margin = int(math.ceil(max(0.001, 2 * crossing_s) * fs))
+        a, b = opened + margin - lo, closed - margin - lo
+        if b > a and abs(float(np.median(light[a:b])) / level - 1) > 0.10:
+            raise ValueError("Full-open light changed by over 10%; recapture the reference")
+    return duration, {
+        "bounds": [lo, hi], "edge_exposure_s": edge_duration,
+        "normalized_area_s": duration, "full_level": level,
+        "peak_fraction_of_reference": peak / level,
+        "tail_fraction_of_reference": tail_level / level,
+        "outer_window_area_s": float(outer_area),
+        "ac_cutoff_hz": reference.ac_cutoff_hz,
+    }
+
+
 def analyze_signal(stereo, nominal_s, expected_travel_ms, path_mm, spacing_mm, aperture_mm,
-                   coupling="AC coupled", fs=FS, ac_method="Auto"):
+                   coupling="AC coupled", fs=FS, ac_method=DEFAULT_AC_METHOD,
+                   integration_reference=None):
     stereo = np.asarray(stereo)
     if stereo.ndim != 2 or stereo.shape[1] < 2:
         raise ValueError("Expected stereo input with two channels")
     stereo = stereo[:, :2]
+    integrate = ac_method == INTEGRATION_METHOD
+    if integrate:
+        if integration_reference is None:
+            raise ValueError("Capture a full-open reference at 1/60 or slower first")
+        if isinstance(integration_reference, dict):
+            integration_reference = IntegrationReference.from_dict(integration_reference)
+        if (integration_reference.sample_rate_hz != fs or integration_reference.coupling != coupling
+                or len(integration_reference.channels) != 2):
+            raise ValueError("Reference sample rate or signal mode changed; capture a new reference")
 
     # A finite optical aperture smears very fast shutter pulses. When the
     # selected speed is short enough for opening/closing AC transients to
@@ -767,15 +1104,23 @@ def analyze_signal(stereo, nominal_s, expected_travel_ms, path_mm, spacing_mm, a
             use_template = True
 
     measurements, opens, closes, confs = [], [], [], []
+    fitted_cutoffs = []
+    integration_details = []
     for c in range(2):
         if use_template:
+            cutoff = _estimate_ac_cutoff(stereo[:, c], fs, nominal_s, sensor_crossing_s)
+            fitted_cutoffs.append(cutoff)
             exp, oi, ci, conf = _template_measure_ac(
-                stereo[:, c], fs, nominal_s, expected_travel_ms, path_mm, aperture_mm
+                stereo[:, c], fs, nominal_s, expected_travel_ms, path_mm, aperture_mm, cutoff
             )
         elif coupling.startswith("AC"):
             exp, oi, ci, conf = edge_results[c]
         else:
             exp, oi, ci, conf = _edge_measure_dc(stereo[:, c], fs, nominal_s)
+        if integrate:
+            exp, details = _measure_light_area(stereo[:, c], oi, ci, fs, sensor_crossing_s,
+                                              integration_reference.channels[c])
+            integration_details.append(details)
         measurements.append(exp)
         opens.append(oi)
         closes.append(ci)
@@ -800,7 +1145,7 @@ def analyze_signal(stereo, nominal_s, expected_travel_ms, path_mm, spacing_mm, a
     mismatch = 100.0 * abs(exp1 - exp2) / avg if avg > 0 else float("nan")
 
     return AnalysisResult(
-        method=("AC template fit" if use_template else
+        method=(INTEGRATION_METHOD if integrate else "AC template fit" if use_template else
                 "AC transient edges" if coupling.startswith("AC") else "DC level edges"),
         exposure_sensor_1_s=exp1,
         exposure_sensor_2_s=exp2,
@@ -815,6 +1160,13 @@ def analyze_signal(stereo, nominal_s, expected_travel_ms, path_mm, spacing_mm, a
             "sensor1_open": opens[0], "sensor2_open": opens[1],
             "sensor1_close": closes[0], "sensor2_close": closes[1],
         },
+        fitted_ac_cutoff_hz=tuple(fitted_cutoffs) if fitted_cutoffs else None,
+        integration_diagnostics=({"reference_id": integration_reference.reference_id,
+                                  "channels": integration_details,
+                                  "timing_basis": "Edge markers measure curtain travel; exposure is normalized light area",
+                                  "reference_condition": "Fixed illumination, gain and sensor position required",
+                                  "ac_model": "first-order" if is_ac else "direct"}
+                                 if integrate else None),
     )
 
 
@@ -859,7 +1211,7 @@ class SearchableCombobox(ttk.Combobox):
 # ---------------------------------------------------------------------------
 
 class ShutterTesterApp:
-    def __init__(self, root):
+    def __init__(self, root, summary_path=None):
         self.root = root
         root.title("Two-Point Shutter Tester v12")
         root.geometry("1320x820")
@@ -889,10 +1241,16 @@ class ShutterTesterApp:
         self.travel_tolerance_var = tk.StringVar(value="Auto (service / ±5%)")
         self.mismatch_tolerance_var = tk.StringVar(value="Auto (service / ±5%)")
         self.coupling_var = tk.StringVar(value="AC coupled")
-        self.ac_method_var = tk.StringVar(value="Auto")
+        self.ac_method_var = tk.StringVar(value=DEFAULT_AC_METHOD)
         self.debug_mode_var = tk.BooleanVar(value=False)
         self.debug_status_var = tk.StringVar(value="Debug recording off")
         self.debug_directory = Path(__file__).resolve().parent / "debug_captures"
+        self.integration_reference = None
+        self.integration_reference_context = None
+        self.reference_pending = False
+        self.reference_previous_nominal = None
+        self.reference_status_var = tk.StringVar(value="No reference captured")
+        self.measurement_note_var = tk.StringVar(value="Exposure uses transition timing.")
 
         self.source_var = tk.StringVar(value="Simulator")
         self.actual_var = tk.StringVar(value="1/1000")
@@ -934,7 +1292,19 @@ class ShutterTesterApp:
         self.tolerance_detail_var = tk.StringVar(value="Select a speed and fire the shutter.")
 
         self.test_history = {}
+        self.test_pass_history = {}
+        self.summary_path = (Path(summary_path) if summary_path is not None else
+                             Path(__file__).resolve().with_name("shutter_summary.json"))
+        self.summary_count_var = tk.StringVar(value="5")
+        self.summary_storage_status_var = tk.StringVar()
+        self.summary_save_blocked = False
+        self._restore_summary()
+        self.speed_buttons = {}
         self._build_ui()
+        self.summary_count_var.trace_add("write", self._summary_count_changed)
+        for var in (self.source_var, self.camera_var, self.coupling_var, self.path_var,
+                    self.spacing_var, self.aperture_var, self.expected_travel_var):
+            var.trace_add("write", self._reference_settings_changed)
         self._refresh_input_devices()
         self._apply_camera_preset()
         self._source_changed()
@@ -1044,13 +1414,13 @@ class ShutterTesterApp:
         coupling.bind("<<ComboboxSelected>>", lambda _e: self._clear_live_state())
         ttk.Label(src, text="Live sources listen continuously; fire the camera whenever ready.",
                   wraplength=330).grid(row=2, column=0, columnspan=3, sticky="w", pady=(3,0))
-        ttk.Label(src, text="AC analysis:").grid(row=3, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(src, text="Exposure method:").grid(row=3, column=0, sticky="w", padx=(0, 6))
         ac_method = ttk.Combobox(
             src, textvariable=self.ac_method_var,
-            values=["Auto", "AC pulse fit", "AC transient edges"], state="readonly",
+            values=[INTEGRATION_METHOD, "AC transient edges", "AC pulse fit", "Auto"], state="readonly",
         )
         ac_method.grid(row=3, column=1, columnspan=2, sticky="ew", pady=2)
-        ac_method.bind("<<ComboboxSelected>>", lambda _e: self._clear_live_state())
+        ac_method.bind("<<ComboboxSelected>>", self._analysis_method_changed)
         ttk.Checkbutton(
             src, text="Debug mode: save every test", variable=self.debug_mode_var,
             command=lambda: self.debug_status_var.set(
@@ -1062,6 +1432,20 @@ class ShutterTesterApp:
             row=5, column=0, columnspan=3, sticky="w", pady=2
         )
         src.columnconfigure(1, weight=1)
+
+        reference_box = ttk.LabelFrame(sidebar, text="Light integration reference", padding=7)
+        reference_box.pack(fill="x", pady=(7, 0))
+        self.reference_capture_button = ttk.Button(
+            reference_box, text="Capture reference from next shot", command=self._request_reference_capture)
+        self.reference_capture_button.pack(fill="x")
+        ttk.Button(reference_box, text="Clear reference", command=self._clear_integration_reference).pack(
+            anchor="e", pady=(4, 0))
+        ttk.Label(reference_box, textvariable=self.reference_status_var, wraplength=330).pack(
+            anchor="w", pady=(4, 0))
+        ttk.Label(reference_box,
+                  text="Use 1/60 or slower for the reference. Keep the light, input gain and sensor position fixed. "
+                       "Recapture after changes. AC integration assumes a first-order response.",
+                  wraplength=330).pack(anchor="w", pady=(4, 0))
 
         # Camera preset
         cam = ttk.LabelFrame(sidebar, text="Camera / shutter preset", padding=7)
@@ -1080,11 +1464,12 @@ class ShutterTesterApp:
         speeds.pack(fill="x", pady=(7, 0))
         for i, speed in enumerate(COMMON_SPEEDS):
             b = tk.Radiobutton(speeds, text=speed, variable=self.nominal_var, value=speed,
-                               indicatoron=False, width=7, padx=1, pady=3, relief="raised",
+                               indicatoron=False, width=8, padx=1, pady=3, relief="raised",
                                command=self._nominal_changed)
             r, c = divmod(i, 4)
             b.grid(row=r, column=c, sticky="ew", padx=1, pady=1)
             speeds.columnconfigure(c, weight=1)
+            self.speed_buttons[speed] = b
 
         # Geometry and travel
         geom = ttk.LabelFrame(sidebar, text="Geometry / expected curtain travel", padding=7)
@@ -1208,13 +1593,15 @@ class ShutterTesterApp:
         details.grid(row=2, column=0, columnspan=3, sticky="ew")
         for column, (label, var) in enumerate((
             ("Sensor mismatch", self.mismatch_var),
-            ("Confidence", self.conf_var), ("Method", self.method_var),
+            ("Signal quality", self.conf_var), ("Method", self.method_var),
         )):
             ttk.Label(details, text=label + ":").grid(row=0, column=column * 2, sticky="w", padx=(0, 5))
             ttk.Label(details, textvariable=var, font=("TkDefaultFont", 10, "bold")).grid(
                 row=0, column=column * 2 + 1, sticky="w", padx=(0, 15)
             )
             details.columnconfigure(column * 2 + 1, weight=1)
+        ttk.Label(metrics, textvariable=self.measurement_note_var, wraplength=740).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         plot_frame = ttk.LabelFrame(main, text="Waveform / detected events", padding=5)
         plot_frame.pack(fill="both", expand=True, pady=(8,0))
@@ -1229,6 +1616,76 @@ class ShutterTesterApp:
         status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w", padding=(6,3))
         status.pack(fill="x", pady=(6,0))
 
+    def _reference_context(self):
+        return tuple(var.get() for var in (
+            self.source_var, self.camera_var, self.coupling_var, self.path_var,
+            self.spacing_var, self.aperture_var, self.expected_travel_var))
+
+    def _reference_settings_changed(self, *_args):
+        if self.integration_reference is not None or self.reference_pending:
+            self._clear_integration_reference()
+            self.reference_status_var.set("Settings changed; capture a new reference")
+
+    def _analysis_method_changed(self, _event=None):
+        self._clear_live_state()
+        self._refresh_summary()
+
+    def _request_reference_capture(self):
+        if self.reference_pending:
+            self._clear_integration_reference()
+            return
+        self.integration_reference = None
+        self.integration_reference_context = None
+        self.reference_previous_nominal = self.nominal_var.get()
+        self.reference_pending = True
+        if parse_speed(self.nominal_var.get()) < 1 / 60:
+            self.nominal_var.set("1/60")
+        self._nominal_changed()
+        self.reference_capture_button.configure(text="Cancel reference capture")
+        self.reference_status_var.set(
+            f"Set the camera to {self.nominal_var.get()} and fire once. The next shot saves the reference.")
+        self._refresh_summary()
+        if self.source_var.get() == "Simulator":
+            self.run_simulator()
+
+    def _clear_integration_reference(self):
+        self.integration_reference = None
+        self.integration_reference_context = None
+        self.reference_pending = False
+        if self.reference_previous_nominal is not None:
+            self.nominal_var.set(self.reference_previous_nominal)
+            self.reference_previous_nominal = None
+            self._nominal_changed()
+        self.reference_capture_button.configure(text="Capture reference from next shot")
+        self.reference_status_var.set("No reference captured")
+        self._clear_live_state()
+        self._refresh_summary()
+
+    def _restore_summary(self):
+        try:
+            self.test_history, self.test_pass_history, count = load_summary_history(self.summary_path)
+        except (OSError, ValueError, TypeError) as exc:
+            self.summary_save_blocked = True
+            self.summary_storage_status_var.set(
+                f"Saved summary could not be loaded: {exc}. File preserved; Clear summary starts a new sheet.")
+        else:
+            self.summary_count_var.set(str(count))
+
+    def _save_summary(self):
+        if self.summary_save_blocked:
+            return
+        try:
+            save_summary_history(self.summary_path, self.test_history, self.test_pass_history,
+                                 int(self.summary_count_var.get()))
+        except (OSError, ValueError, TypeError) as exc:
+            self.summary_storage_status_var.set(f"Summary kept in memory, but could not be saved: {exc}")
+        else:
+            self.summary_storage_status_var.set("")
+
+    def _summary_count_changed(self, *_args):
+        self._save_summary()
+        self._refresh_summary()
+
     def _build_summary_panel(self, panel):
         ttk.Label(
             panel, text="Shutter speed test summary",
@@ -1241,14 +1698,12 @@ class ShutterTesterApp:
         options = ttk.Frame(panel)
         options.pack(fill="x", pady=(0, 6))
         ttk.Label(options, text="Latest tests per speed:").pack(side="left")
-        self.summary_count_var = tk.StringVar(value="5")
         count_selector = ttk.Combobox(
             options, textvariable=self.summary_count_var,
             values=[str(count) for count in range(1, 21)],
             state="readonly", width=4,
         )
         count_selector.pack(side="left", padx=(8, 0))
-        count_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_summary())
         ttk.Label(
             panel,
             text="Last 20 completed tests retained per speed; exposure averaged across both sensors.",
@@ -1258,13 +1713,13 @@ class ShutterTesterApp:
         style.configure("Summary.Treeview", rowheight=30, font=("TkDefaultFont", 11))
         style.configure("Summary.Treeview.Heading", font=("TkDefaultFont", 10, "bold"))
         self.summary_table = ttk.Treeview(
-            panel, columns=("speed", "count", "average", "min", "max"),
+            panel, columns=("speed", "count", "min", "average", "max"),
             show="headings", height=len(COMMON_SPEEDS), style="Summary.Treeview",
             selectmode="none",
         )
         for column, title, width in (
             ("speed", "Marked speed", 110), ("count", "Tests", 65),
-            ("average", "Average (ms / stops)", 200), ("min", "Min (ms / stops)", 200),
+            ("min", "Min (ms / stops)", 200), ("average", "Average (ms / stops)", 200),
             ("max", "Max (ms / stops)", 200),
         ):
             self.summary_table.heading(column, text=title)
@@ -1274,42 +1729,57 @@ class ShutterTesterApp:
         footer = ttk.Frame(panel)
         footer.pack(fill="x", pady=(12, 0))
         ttk.Label(
-            footer, text="Current session only. Min / max refer to exposure duration."
+            footer, text="Saved until Clear summary, including after restarting. Min / max refer to exposure duration."
         ).pack(side="left")
         ttk.Button(footer, text="Clear summary", command=self._clear_summary).pack(side="right")
+        ttk.Label(panel, textvariable=self.summary_storage_status_var, foreground="#a32727",
+                  wraplength=700).pack(anchor="w", pady=(4, 0))
         ttk.Label(panel, text="Signed stops vs marked speed: + longer exposure, - shorter exposure.").pack(
+            anchor="w", pady=(4, 0)
+        )
+        ttk.Label(panel, text="✓ on a speed button means the selected number of latest tests all recorded overall PASS.").pack(
             anchor="w", pady=(4, 0)
         )
         self._refresh_summary()
 
     def _refresh_summary(self):
         count = int(self.summary_count_var.get())
-        source = self.source_var.get()
-        self.summary_source_var.set(f"Input: {source}")
-        history = self.test_history.get(source, {})
+        self.summary_source_var.set("Current sheet — all recorded tests")
+        history = self.test_history
         self.summary_table.delete(*self.summary_table.get_children())
-        for index, speed in enumerate(COMMON_SPEEDS):
+        tested_speeds = [speed for speed in COMMON_SPEEDS if history.get(parse_speed(speed))]
+        for index, speed in enumerate(tested_speeds):
             values = list(history.get(parse_speed(speed), ()))[-count:]
-            stats = ("—", "—", "—")
-            if values:
-                stats = tuple(format_summary_measurement(value, parse_speed(speed)) for value in (
-                    sum(values) / len(values), min(values), max(values)
-                ))
+            stats = tuple(format_summary_measurement(value, parse_speed(speed)) for value in (
+                min(values), sum(values) / len(values), max(values)
+            ))
             self.summary_table.insert(
                 "", "end", values=(speed, f"{len(values)}/{count}", *stats),
                 tags=("alternate",) if index % 2 else (),
             )
+        self._update_speed_checkmarks()
+
+    def _update_speed_checkmarks(self):
+        count = int(self.summary_count_var.get())
+        history = self.test_pass_history
+        for speed, button in self.speed_buttons.items():
+            passed = passing_test_window(history.get(parse_speed(speed), ()), count)
+            button.configure(text=f"✓ {speed}" if passed else speed)
 
     def _record_summary(self, result: AnalysisResult, nominal_s: float):
         exposure = result.exposure_average_s
         if not np.isfinite(exposure) or exposure <= 0:
             return
-        history = self.test_history.setdefault(self.source_var.get(), {})
-        history.setdefault(nominal_s, deque(maxlen=20)).append(exposure)
+        self.test_history.setdefault(nominal_s, deque(maxlen=20)).append(exposure)
+        self.test_pass_history.setdefault(nominal_s, deque(maxlen=20)).append(self.pass_fail_var.get() == "PASS")
+        self._save_summary()
         self._refresh_summary()
 
     def _clear_summary(self):
-        self.test_history.pop(self.source_var.get(), None)
+        self.test_history.clear()
+        self.test_pass_history.clear()
+        self.summary_save_blocked = False
+        self._save_summary()
         self._refresh_summary()
 
     def _travel_row(self, frame, row, label, value_var, status_var):
@@ -1579,13 +2049,28 @@ class ShutterTesterApp:
         nominal = parse_speed(self.nominal_var.get())
         # 3-stop tolerance is intentionally generous for initial tensioning.
         wait_s = min(10.0, max(0.12, nominal * (2 ** SEARCH_STOPS) + 0.10))
-        if now - self.live_trigger_time < wait_s:
+        timed_out = now - self.live_trigger_time >= wait_s
+        check_close = nominal >= LIVE_EARLY_CLOSE_MIN_S
+        ready = False
+        if check_close:
+            try:
+                path, _, aperture, travel_ms = self._parse_geometry()
+                start = _live_analysis_start(data, self.live_peak_floor)
+                ready = _live_closing_ready(data[start:], nominal, path, aperture, travel_ms,
+                                            self.coupling_var.get())
+            except ValueError:
+                pass  # A partial capture will be checked again as more audio arrives.
+        if not ready and not timed_out:
             return
 
-        # Analyze the whole retained window. The analyzer locates the shutter event.
         try:
-            self._analyze_and_display(data, source_desc="live audio")
-            self.status_var.set("LIVE — measurement captured. Listening for next shutter.")
+            capturing_reference = self.reference_pending
+            if check_close and not ready:
+                self._analyze_and_display(data, source_desc="live audio", closing_timeout=True)
+            else:
+                self._analyze_and_display(data, source_desc="live audio")
+            if not capturing_reference:
+                self.status_var.set("LIVE — measurement captured. Listening for next shutter.")
         except Exception as exc:
             self.status_var.set(f"LIVE — trigger rejected ({exc}). Listening…")
         with self.live_lock:
@@ -1615,6 +2100,11 @@ class ShutterTesterApp:
             "template_ac_cutoff_hz": DEFAULT_AC_HZ,
             "template_sensor_tau_us": SENSOR_TAU_US,
             "search_stops": SEARCH_STOPS,
+            "capture_purpose": ("full-open reference" if getattr(self, "reference_pending", False)
+                                else "measurement"),
+            "integration_reference": (asdict(self.integration_reference)
+                                      if getattr(self, "integration_reference", None) is not None else None),
+            "integration_reference_context": getattr(self, "integration_reference_context", None),
             "simulator": {
                 "actual_speed": self.actual_var.get(),
                 "first_travel_ms": self.sim_first_var.get(),
@@ -1622,7 +2112,46 @@ class ShutterTesterApp:
             } if source_desc == "simulator" else None,
         }
 
-    def _analyze_and_display(self, samples, source_desc):
+    def _clear_measurement_values(self, status):
+        for var in (self.s1_var, self.s2_var, self.avg_var, self.s1_duration_var,
+                    self.s2_duration_var, self.avg_duration_var, self.s1_variance_var,
+                    self.s2_variance_var, self.avg_variance_var, self.variance_var,
+                    self.travel1_var, self.travel2_var, self.curtain_mismatch_var,
+                    self.mismatch_var, self.conf_var):
+            var.set("—")
+        self._set_indicator(None)
+        for name, var in self.exposure_status_vars.items():
+            var.set(status)
+            self.exposure_status_labels[name].configure(foreground="#808080")
+        self._set_small_indicator(self.t1_dot, self.t1_circle, self.t1_label, self.travel1_status_var, None)
+        self._set_small_indicator(self.t2_dot, self.t2_circle, self.t2_label, self.travel2_status_var, None)
+        self._set_small_indicator(self.tm_dot, self.tm_circle, self.tm_label, self.curtain_mismatch_status_var, None)
+
+    def _accept_integration_reference(self, reference, samples, nominal, path, spacing, aperture, expected_ms):
+        markers = analyze_signal(samples, nominal, expected_ms, path, spacing, aperture,
+                                 self.coupling_var.get(), ac_method=DEFAULT_AC_METHOD)
+        self.integration_reference = reference
+        self.integration_reference_context = self._reference_context()
+        self.reference_pending = False
+        self.reference_capture_button.configure(text="Capture reference from next shot")
+        self.reference_status_var.set("Reference ready. Keep light, gain and sensor position fixed.")
+        self.ac_method_var.set(INTEGRATION_METHOD)
+        if self.reference_previous_nominal is not None:
+            self.nominal_var.set(self.reference_previous_nominal)
+            self.reference_previous_nominal = None
+            self._nominal_changed()
+        self.samples = samples
+        self.result = None
+        self.result_context = None
+        self._update_plot(samples, markers)
+        self.method_var.set("Full-open reference captured")
+        self._clear_measurement_values("REFERENCE")
+        self.tolerance_detail_var.set("Reference saved; this shot is not included in the test summary.")
+        self.measurement_note_var.set("Reference-based integration is selected. Select a test speed and fire.")
+        self.status_var.set(f"Reference saved. Set the camera to {self.nominal_var.get()} and fire; listening continues.")
+        self._refresh_summary()
+
+    def _analyze_and_display(self, samples, source_desc, *, closing_timeout=False):
         debug = self.debug_mode_var.get()
         settings = self._debug_settings(source_desc) if debug else None
         raw_samples = samples
@@ -1639,16 +2168,27 @@ class ShutterTesterApp:
                                 expected_travel_ms=expected_ms)
             if source_desc == "live audio":
                 # Keep the original buffer for debug replay before trimming idle audio.
-                baseline = samples[:max(8, int(0.008 * FS))]
-                centered = samples - np.median(baseline, axis=0)
-                sigma = max(robust_sigma(baseline[:, 0]), robust_sigma(baseline[:, 1]))
-                hits = np.flatnonzero(np.any(np.abs(centered) >= max(self.live_peak_floor, 8 * sigma), axis=1))
-                if not len(hits):
-                    raise ValueError("No clear shutter opening in retained audio")
-                start = max(0, int(hits[0]) - int(0.012 * FS))
+                start = _live_analysis_start(samples, self.live_peak_floor)
                 samples = samples[start:]
+            if closing_timeout:
+                raise ValueError("Timed out waiting for both sensors to see the shutter close")
+            if getattr(self, "reference_pending", False):
+                reference = capture_integration_reference(
+                    samples, nominal, expected_ms, path, aperture, self.coupling_var.get())
+                self._accept_integration_reference(reference, samples, nominal, path, spacing, aperture, expected_ms)
+                if debug:
+                    settings["integration_reference"] = asdict(reference)
+                    settings["integration_reference_context"] = self.integration_reference_context
+                    assessment = {"overall": "REFERENCE", "detail": "Full-open reference; not a test result"}
+                return
+            reference = None
+            if self.ac_method_var.get() == INTEGRATION_METHOD:
+                reference = getattr(self, "integration_reference", None)
+                if reference is not None and self.integration_reference_context != self._reference_context():
+                    raise ValueError("Reference settings changed; capture a new reference")
             result = analyze_signal(samples, nominal, expected_ms, path, spacing, aperture,
-                                    self.coupling_var.get(), ac_method=self.ac_method_var.get())
+                                    self.coupling_var.get(), ac_method=self.ac_method_var.get(),
+                                    integration_reference=reference)
             self.samples = samples
             self.result = result
             self.result_context = (nominal, path, expected_ms)
@@ -1664,6 +2204,17 @@ class ShutterTesterApp:
                               "detail": self.tolerance_detail_var.get()}
         except Exception as exc:
             error = str(exc)
+            if self.ac_method_var.get() == INTEGRATION_METHOD or getattr(self, "reference_pending", False):
+                self.result = None
+                self.result_context = None
+                self._clear_measurement_values("REJECTED")
+                self.method_var.set("Integration / reference rejected")
+                self.tolerance_detail_var.set(error)
+                self.measurement_note_var.set("No exposure result was recorded for this capture.")
+                self.ax.clear()
+                self.ax.text(0.5, 0.5, "Reference / signal check failed\n" + error,
+                             ha="center", va="center", wrap=True, transform=self.ax.transAxes)
+                self.canvas.draw_idle()
             raise
         finally:
             if debug:
@@ -1683,6 +2234,10 @@ class ShutterTesterApp:
 
     def _update_results(self, r, nominal, path_mm, expected_ms):
         self.method_var.set(r.method)
+        if hasattr(self, "measurement_note_var"):
+            self.measurement_note_var.set(
+                "Exposure is integrated light / full-open reference. Plot markers show curtain edge timing."
+                if r.integration_diagnostics else "Exposure uses transition timing; signal quality is not timing accuracy.")
         self.avg_var.set(format_speed(r.exposure_average_s))
         channels = infer_sensor_channels(r.event_indices)
         first_channel, second_channel = channels or (1, 2)
@@ -1847,6 +2402,8 @@ class ShutterTesterApp:
                 label = f"{'S' + str(sensor) if channels else 'CH' + str(channel)} {'open' if opening else 'close'}"
                 if estimated:
                     label += " (fit)"
+                elif r.integration_diagnostics:
+                    label += " (edge)"
                 self.ax.axvline(
                     idx / FS * 1000.0, linewidth=1.0, alpha=0.65,
                     color=f"C{sensor - 1}", linestyle="--" if opening else ":",
@@ -1854,11 +2411,13 @@ class ShutterTesterApp:
                 )
         if hi - lo > 1:
             self.ax.set_xlim(t[0], t[-1])
-        self.ax.set_title(f"{r.method}" + (" — opening/closing times estimated from pulse shape" if estimated else ""))
+        note = ("\nExposure is light area; markers are edge timings for curtain travel"
+                if r.integration_diagnostics else " — opening/closing times estimated from pulse shape" if estimated else "")
+        self.ax.set_title(f"{r.method}{note}", fontsize=10 if r.integration_diagnostics else 12)
         self.ax.set_xlabel("Time (ms)")
         self.ax.set_ylabel("Amplitude")
         self.ax.grid(True, alpha=0.2)
-        self.ax.legend(loc="upper right")
+        self.ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=8)
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
@@ -1869,6 +2428,7 @@ class ShutterTesterApp:
             messagebox.showerror("Shutter tester", text)
 
     def _on_close(self):
+        self._save_summary()
         self._stop_audio_stream()
         self.root.destroy()
 
